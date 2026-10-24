@@ -1,0 +1,8 @@
+# Machine-generated benchmark results — local-only.
+# These embed developer-specific paths (e.g. swarmPath references) and are
+# not reproducible in CI without the originating corpus + Ollama. Reproduce
+# locally with `pnpm --filter @mnmal-ai/swarm-benchmark <runner>`; do not
+# commit results files.
+recall-sweep-results.json
+run-recall-guardrails-results.json
+*-results.json

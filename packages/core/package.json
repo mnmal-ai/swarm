@@ -1,0 +1,22 @@
+{
+  "name": "@mnmal-ai/swarm-core",
+  "version": "1.0.0-alpha.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=verbose --reporter=json --outputFile=test-results.json --coverage --coverage.reporter=json-summary --coverage.reporter=text"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@mnmal-ai/swarm-events": "workspace:*",
+    "@mnmal-ai/swarm-substrate": "workspace:*",
+    "@mnmal-ai/swarm-types": "workspace:*",
+    "@mnmal-ai/swarm-worker-backends": "workspace:*",
+    "@mnmal-ai/context-render": "1.0.0-alpha.7",
+    "openai": "^6.22.0",
+    "uuid": "^11.0.0"
+  }
+}

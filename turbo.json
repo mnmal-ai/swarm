@@ -1,0 +1,27 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "env": ["SWARM_VERSION_OVERRIDE"],
+      "outputs": ["dist/**"]
+    },
+    "@mnmal-ai/swarm-cli#build": {
+      "dependsOn": ["^build", "@mnmal-ai/swarm-substrate-plugin#build"],
+      "env": ["SWARM_VERSION_OVERRIDE"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "env": ["SWARM_PATH", "SWARM_SDK_E2E", "SWARM_SDK_CLAUDE", "SWARM_SDK_PG", "SWARM_TEST_RECALL", "SWARM_TEST_POSTGRES_URL", "SWARM_TEST_META_POSTGRES_URL"],
+      "passThroughEnv": ["SWARM_E2E_KEEP"]
+    },
+    "test:ci": {
+      "dependsOn": ["^build"],
+      "env": ["SWARM_PATH", "SWARM_SDK_E2E", "SWARM_SDK_CLAUDE", "SWARM_SDK_PG", "SWARM_TEST_RECALL", "SWARM_TEST_POSTGRES_URL", "SWARM_TEST_META_POSTGRES_URL"],
+      "passThroughEnv": ["SWARM_E2E_KEEP"],
+      "outputs": ["test-results.json", "coverage/**"]
+    },
+    "lint": {}
+  }
+}

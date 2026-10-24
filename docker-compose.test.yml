@@ -1,0 +1,44 @@
+name: swarm-substrate-test
+
+# Isolated Postgres pair for swarm's OWN test + cold-test runs on Substrate.
+# Ports are deliberately offset from the live defaults (32337-32341) so a
+# self-modifying `swarm run` never collides with or pollutes the runtime store.
+#   cold-test Postgres : 42337  (its sidecar runs on 42338 via SWARM_SUBSTRATE_PORT)
+#   meta-test Postgres : 42340  (its meta sidecar on 42341 via SWARM_META_PORT)
+# Bring up:  docker compose -f docker-compose.test.yml up -d --wait
+# The test globalSetup (tests/setup/isolated-substrate.ts) uses this stack only
+# with SWARM_SDK_PG=1; cold tests reach it through scripts/cold-test-env.sh.
+services:
+  swarm-substrate-test:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm
+    ports:
+      - "127.0.0.1:42337:5432"
+    volumes:
+      - swarm_substrate_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm -d swarm"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  swarm-meta-test:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm_meta
+    ports:
+      - "127.0.0.1:42340:5432"
+    volumes:
+      - swarm_meta_substrate_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm -d swarm_meta"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  swarm_substrate_test_data:
+  swarm_meta_substrate_test_data:

@@ -1,0 +1,25 @@
+{
+  "routes": [
+    {
+      "intent": "implementation",
+      "description": "Write or change code, with the tests that cover it.",
+      "keywords": ["implement", "build", "add", "fix", "refactor", "test"],
+      "load": {
+        "core": ["core/style.md", "core/testing.md"]
+      }
+    },
+    {
+      "intent": "documentation",
+      "description": "Write or update documentation.",
+      "keywords": ["docs", "document", "readme", "guide", "explain"],
+      "load": {
+        "core": ["core/style.md", "core/docs.md"]
+      }
+    }
+  ],
+  "fallback": {
+    "load": {
+      "core": ["core/style.md"]
+    }
+  }
+}

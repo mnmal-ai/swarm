@@ -1,0 +1,11 @@
+{
+  "$comment": "MCP config stub copied in when the playwright suggestion is accepted. Merge the entry under mcpServers into each backend's config. Drives a real browser for end-to-end checks; no secrets required.",
+  "mcpServers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "env": {}
+    }
+  }
+}

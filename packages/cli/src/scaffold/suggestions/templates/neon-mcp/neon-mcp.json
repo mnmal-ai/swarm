@@ -1,0 +1,13 @@
+{
+  "$comment": "MCP config stub copied in when the neon suggestion is accepted. Merge the entry under mcpServers into each backend's config. NEON_API_KEY reads from env — never inline a Neon API key or connection string here.",
+  "mcpServers": {
+    "neon": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@neondatabase/mcp-server-neon", "start"],
+      "env": {
+        "NEON_API_KEY": "${NEON_API_KEY}"
+      }
+    }
+  }
+}

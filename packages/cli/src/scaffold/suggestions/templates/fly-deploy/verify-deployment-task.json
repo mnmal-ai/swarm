@@ -1,0 +1,25 @@
+{
+  "$comment": "DRAFT verify-deployment task scaffolded by /prepare-for-swarm for Fly.io. Adapt acceptance criteria to your project before relying on it.",
+  "id": "verify-fly-deployment",
+  "title": "Verify Fly.io deployment",
+  "axis": "deployment-completion",
+  "platform": "fly",
+  "mode": "verification",
+  "description": "Confirm the latest Fly.io deploy is live and healthy without modifying source. If verification fails because the deploy is broken, capture the failure and report it — do not edit production code to make the check pass.",
+  "steps": [
+    "Confirm the build artifact exists and the deploy command (`flyctl deploy --strategy canary`) completed without error.",
+    "`flyctl status` must show all machines on the new release and passing health checks.",
+    "Confirm no error-level logs in the first minute after deploy.",
+    "Record the deployed URL/version and the health-check result."
+  ],
+  "acceptance_criteria": [
+    "Deploy command exited 0.",
+    "Health check returns a successful (2xx / ready) response.",
+    "No new error-level logs attributable to this release.",
+    "Deployed URL/version recorded in the task output."
+  ],
+  "constraints": [
+    "Verification only — do not modify source to make the check pass.",
+    "Do not promote to production from this task; promotion is a separate explicit step."
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "_description": "Expected route-to-file-to-role mappings. Defaults match swarm.json. Override mechanism for forks.",
+  "_lastSynced": "2026-03-04",
+
+  "swarmPath": null,
+
+  "knownProjects": ["alpha-app", "beta-service"],
+
+  "roles": {
+    "worker": { "tiers": "all" },
+    "reviewer": { "tiers": ["mode", "domain", "oversight"] },
+    "orchestrator": { "fixedIntent": "orchestration", "tiers": "all" }
+  },
+
+  "requiredTiers": ["core", "mode", "oversight"],
+
+  "routes": {
+    "code-review": {
+      "core": ["core/values.md", "core/rules.md", "core/voice.md"],
+      "mode": ["modes/code-review.md"],
+      "oversight": ["oversight/review-policy.json"],
+      "capabilities": ["capabilities/git-workflow.md"],
+      "domain": ["domains/{project}/conventions.md", "domains/{project}/constraints.md"],
+      "skills_vetted": [
+        "https://raw.githubusercontent.com/AvdLee/SwiftUI-Agent-Skill/8e18d4f905bf28ce3bd73594bf6ff9913fa6882d/swiftui-expert-skill/SKILL.md",
+        "https://raw.githubusercontent.com/AvdLee/Swift-Concurrency-Agent-Skill/76165e3d72210ac2b1f79b49e567d2994176466e/swift-concurrency/SKILL.md",
+        "skills/vetted/drizzle-neon.md",
+        "skills/vetted/express-rest.md",
+        "skills/vetted/zod-validation.md"
+      ]
+    },
+    "implementation": {
+      "core": ["core/values.md", "core/rules.md", "core/voice.md"],
+      "mode": ["modes/implementation.md"],
+      "oversight": ["oversight/review-policy.json"],
+      "capabilities": ["capabilities/git-workflow.md", "capabilities/testing.md"],
+      "domain": ["domains/{project}/architecture.md", "domains/{project}/conventions.md", "domains/{project}/constraints.md", "domains/{project}/overview.md"],
+      "skills_vetted": [
+        "https://raw.githubusercontent.com/AvdLee/SwiftUI-Agent-Skill/8e18d4f905bf28ce3bd73594bf6ff9913fa6882d/swiftui-expert-skill/SKILL.md",
+        "https://raw.githubusercontent.com/AvdLee/Swift-Concurrency-Agent-Skill/76165e3d72210ac2b1f79b49e567d2994176466e/swift-concurrency/SKILL.md",
+        "skills/vetted/xcodebuild-mcp.md",
+        "skills/vetted/drizzle-neon.md",
+        "skills/vetted/express-rest.md",
+        "skills/vetted/zod-validation.md"
+      ]
+    },
+    "investigation": {
+      "core": ["core/values.md", "core/rules.md"],
+      "mode": ["modes/investigation.md"],
+      "oversight": ["oversight/review-policy.json"],
+      "capabilities": [],
+      "domain": ["domains/{project}/architecture.md", "domains/{project}/constraints.md", "domains/{project}/overview.md"]
+    },
+    "onboarding": {
+      "core": ["core/values.md", "core/rules.md", "core/voice.md"],
+      "mode": ["modes/onboarding.md"],
+      "oversight": ["oversight/review-policy.json"]
+    },
+    "orchestration": {
+      "core": ["core/values.md", "core/rules.md", "core/voice.md"],
+      "mode": ["modes/orchestration.md"],
+      "oversight": ["oversight/review-policy.json"],
+      "domain": [
+        "domains/{project}/overview.md",
+        "domains/{project}/constraints.md",
+        "domains/{project}/conventions.md",
+        "domains/{project}/definition-of-done.md",
+        "domains/{project}/goals.json"
+      ]
+    },
+    "fallback": {
+      "core": ["core/values.md", "core/rules.md", "core/voice.md"]
+    }
+  },
+
+  "regressionChecks": [
+    {
+      "id": "orchestration-must-load-conventions",
+      "route": "orchestration",
+      "tier": "domain",
+      "filePattern": "conventions.md",
+      "reason": "Feb 25 run produced UIKit instead of SwiftUI because orchestrator never saw conventions.md."
+    },
+    {
+      "id": "orchestration-must-load-definition-of-done",
+      "route": "orchestration",
+      "tier": "domain",
+      "filePattern": "definition-of-done.md",
+      "reason": "Orchestrator needs definition-of-done to create validation tasks."
+    }
+  ],
+
+  "overrides": {}
+}

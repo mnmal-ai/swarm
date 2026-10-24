@@ -1,0 +1,19 @@
+# npm uses this instead of .gitignore when present.
+# We need dist/ included in the package even though it's gitignored.
+
+node_modules/
+.env
+.env.local
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+coverage/
+src/
+tests/
+scripts/
+.claude/
+.github/

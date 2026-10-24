@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SwarmSubstratePluginConfig",
+  "description": "Operator-overridable config for @mnmal-ai/swarm-substrate-plugin. Substrate's loader merges default-config.json with <SUBSTRATE_PLUGIN_DIR>/swarm.config.json. Informational: the bootstrap's zod schema is the validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope"],
+  "properties": {
+    "scope": {
+      "type": "string",
+      "enum": ["cold", "meta", "combined"],
+      "description": "Required, no default. Which namespaces this instance owns: 'cold' serves <namespace> and <namespace>-docs, 'meta' serves <namespace>_meta, 'combined' serves all three."
+    },
+    "namespace": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "default": "swarm",
+      "description": "The swarm namespace (SwarmConfig, SwarmContent, SwarmRoute, WorkerResult, ReviewVerdict, ArbiterDecision, SessionEvent, OversightChain, TranscriptEntry, Goal, TaskExecution, LearningEntry, McpServer, FailurePostmortem, Observation). The docs namespace is <namespace>-docs and the meta namespace <namespace>_meta."
+    },
+    "contextNamespace": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "default": "cortext",
+      "description": "The context-store namespace observations are promoted into."
+    },
+    "drainstopIntervalMs": {
+      "type": "integer",
+      "minimum": 100,
+      "default": 3600000,
+      "description": "How often the drainstop promotes and expires observations, in milliseconds."
+    }
+  }
+}

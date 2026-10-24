@@ -1,0 +1,42 @@
+{
+  "name": "@mnmal-ai/swarm-cli",
+  "version": "1.0.0-alpha.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "bin": {
+    "swarm": "./dist/src/cli/main.js"
+  },
+  "scripts": {
+    "prebuild": "bash ../../scripts/pack-substrate-plugin.sh && node ../../scripts/generate-version.mjs",
+    "build": "tsc && cp src/server/dashboard.html dist/src/server/dashboard.html && cp -r src/server/axon dist/src/server/ && cp -r src/scaffold/suggestions dist/src/scaffold/ && (cp -r src/scaffold/templates dist/src/scaffold/ 2>/dev/null; cp -r src/scaffold/skill-templates dist/src/scaffold/ 2>/dev/null; true)",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=verbose --reporter=json --outputFile=test-results.json --coverage --coverage.reporter=json-summary --coverage.reporter=text"
+  },
+  "dependencies": {
+    "@mnmal-ai/swarm-types": "workspace:*",
+    "@mnmal-ai/swarm-events": "workspace:*",
+    "@mnmal-ai/swarm-core": "workspace:*",
+    "@mnmal-ai/swarm-telemetry": "workspace:*",
+    "@mnmal-ai/swarm-oversight": "workspace:*",
+    "@mnmal-ai/swarm-worker-backends": "workspace:*",
+    "@mnmal-ai/swarm-task-backends": "workspace:*",
+    "@mnmal-ai/swarm-orchestrator": "workspace:*",
+    "@mnmal-ai/swarm-benchmark": "workspace:*",
+    "@mnmal-ai/swarm-substrate": "workspace:*",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@clack/prompts": "^1.1.0",
+    "picocolors": "^1.1.1",
+    "ws": "^8.18.0",
+    "uuid": "^11.0.0",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@mnmal-ai/swarm-substrate-plugin": "workspace:*",
+    "jsdom": "^26.1.0"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ]
+}

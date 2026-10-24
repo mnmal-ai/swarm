@@ -1,0 +1,13 @@
+{
+  "$comment": "MCP config stub copied in when the slack suggestion is accepted. Merge the entry under mcpServers into each backend's config. SLACK_BOT_TOKEN reads from env — never commit a bot token into this file.",
+  "mcpServers": {
+    "slack": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-slack"],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}"
+      }
+    }
+  }
+}

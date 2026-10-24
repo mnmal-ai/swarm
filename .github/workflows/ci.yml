@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm version pinned via root package.json "packageManager" field
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm turbo build
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm version pinned via root package.json "packageManager" field
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint all packages
+        run: pnpm turbo lint
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm version pinned via root package.json "packageManager" field
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm turbo build
+
+      - name: Run all tests with coverage
+        id: tests
+        run: |
+          pnpm turbo test:ci 2>&1 | tee test-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Aggregate per-package test results and coverage
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const pkgsDir = 'packages';
+
+            // Collect test results from each package
+            const packages = fs.readdirSync(pkgsDir).filter(d =>
+              fs.existsSync(path.join(pkgsDir, d, 'test-results.json'))
+            );
+
+            if (packages.length === 0) {
+              console.log('_No test results found. Packages may not have test:ci scripts._');
+              process.exit(0);
+            }
+
+            let totalPassed = 0, totalFailed = 0, totalSkipped = 0, totalSuites = 0;
+            const rows = [];
+
+            for (const pkg of packages.sort()) {
+              const resultsPath = path.join(pkgsDir, pkg, 'test-results.json');
+              const r = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+              const passed = r.numPassedTests;
+              const failed = r.numFailedTests;
+              const skipped = r.numPendingTests;
+              const suites = r.numTotalTestSuites;
+              const duration = (r.testResults.reduce((a, t) => a + (t.endTime - t.startTime), 0) / 1000).toFixed(1);
+              const icon = failed > 0 ? '❌' : '✅';
+
+              totalPassed += passed;
+              totalFailed += failed;
+              totalSkipped += skipped;
+              totalSuites += suites;
+
+              // Package-level summary row
+              rows.push('| ' + icon + ' **' + pkg + '** | ' + passed + ' passed' + (failed ? ', ' + failed + ' failed' : '') + (skipped ? ', ' + skipped + ' skipped' : '') + ' | ' + suites + ' | ' + duration + 's |');
+
+              // Individual test suites within the package
+              for (const suite of r.testResults) {
+                const suiteName = suite.name.split('/tests/').pop() || suite.name.split('/').pop();
+                const sp = suite.assertionResults.filter(t => t.status === 'passed').length;
+                const sf = suite.assertionResults.filter(t => t.status === 'failed').length;
+                const ss = suite.assertionResults.filter(t => t.status === 'pending').length;
+                const sd = ((suite.endTime - suite.startTime) / 1000).toFixed(1);
+                const sIcon = sf > 0 ? '❌' : ss > 0 && sp === 0 ? '⏭️' : '✅';
+                const counts = sf > 0 ? sp + ' passed, ' + sf + ' failed' : ss > 0 ? sp + ' passed, ' + ss + ' skipped' : sp + ' passed';
+                rows.push('| \u00A0\u00A0\u00A0' + sIcon + ' ' + suiteName + ' | ' + counts + ' | | ' + sd + 's |');
+              }
+            }
+
+            const topIcon = totalFailed > 0 ? '❌' : '✅';
+            console.log(topIcon + ' **' + totalPassed + ' passed**, ' + totalFailed + ' failed, ' + totalSkipped + ' skipped (' + (totalPassed + totalFailed + totalSkipped) + ' total across ' + totalSuites + ' suites)');
+            console.log('');
+            console.log('| Package / Suite | Tests | Suites | Duration |');
+            console.log('|----------------|-------|--------|----------|');
+            rows.forEach(r => console.log(r));
+
+            // Coverage section
+            console.log('');
+            console.log('### Coverage');
+            console.log('');
+            console.log('| Package | Statements | Branches | Functions | Lines |');
+            console.log('|---------|------------|----------|-----------|-------|');
+
+            for (const pkg of packages.sort()) {
+              const covPath = path.join(pkgsDir, pkg, 'coverage', 'coverage-summary.json');
+              if (fs.existsSync(covPath)) {
+                const c = JSON.parse(fs.readFileSync(covPath, 'utf8')).total;
+                const fmt = (m) => m.pct + '%';
+                console.log('| **' + pkg + '** | ' + fmt(c.statements) + ' | ' + fmt(c.branches) + ' | ' + fmt(c.functions) + ' | ' + fmt(c.lines) + ' |');
+              } else {
+                console.log('| **' + pkg + '** | _no coverage_ | | | |');
+              }
+            }
+          " >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if tests failed
+        if: always() && steps.tests.outputs.exit_code != '0'
+        run: exit 1
+
+  # Guard: prevent false-green CI when tests are skipped due to missing config
+  test-gate:
+    name: Test Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [tests]
+    steps:
+      - name: Fail if tests were skipped
+        if: needs.tests.result == 'skipped'
+        run: |
+          echo "::error::Tests were skipped unexpectedly."
+          exit 1
+      - name: Fail if tests failed
+        if: needs.tests.result == 'failure'
+        run: exit 1

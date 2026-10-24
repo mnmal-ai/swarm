@@ -1,0 +1,22 @@
+{
+  "name": "@mnmal-ai/swarm",
+  "version": "1.0.0-alpha.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@mnmal-ai/swarm-types": "workspace:*",
+    "@mnmal-ai/swarm-events": "workspace:*",
+    "@mnmal-ai/swarm-core": "workspace:*",
+    "@mnmal-ai/swarm-telemetry": "workspace:*",
+    "@mnmal-ai/swarm-oversight": "workspace:*",
+    "@mnmal-ai/swarm-worker-backends": "workspace:*",
+    "@mnmal-ai/swarm-task-backends": "workspace:*",
+    "@mnmal-ai/swarm-orchestrator": "workspace:*",
+    "@mnmal-ai/swarm-benchmark": "workspace:*",
+    "@mnmal-ai/swarm-cli": "workspace:*"
+  }
+}

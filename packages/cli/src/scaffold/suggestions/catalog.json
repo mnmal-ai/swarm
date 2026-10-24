@@ -1,0 +1,619 @@
+{
+  "$comment": "Suggestion catalog for /prepare-for-swarm. Pure data — no runtime logic, no LLM calls. Conforms to CatalogEntry in ./types.ts. templateFiles paths are relative to suggestions/templates/<id>/ and MUST exist on disk (catalog-shape test asserts presence). Deployment-completion axis seeded first; skill and mcp entries are appended later.",
+  "entries": [
+    {
+      "id": "vercel-deploy",
+      "axis": "deployment-completion",
+      "title": "Vercel deployment",
+      "suggestionText": "This repo looks like it deploys to Vercel. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can drive and gate Vercel deploys (build, preview verify, promote).",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "vercel.json"
+        },
+        {
+          "kind": "file",
+          "glob": "vercel.ts"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "^vercel$"
+        },
+        {
+          "kind": "file",
+          "glob": ".vercel/**"
+        }
+      ],
+      "templateFiles": [
+        "deploy-vercel.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "Vercel config or dependency detected.",
+      "impact": "high"
+    },
+    {
+      "id": "cloudflare-workers-deploy",
+      "axis": "deployment-completion",
+      "title": "Cloudflare Workers deployment",
+      "suggestionText": "This repo looks like it deploys to Cloudflare Workers via Wrangler. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can build, preview, and publish Workers.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "wrangler.toml"
+        },
+        {
+          "kind": "file",
+          "glob": "wrangler.jsonc"
+        },
+        {
+          "kind": "file",
+          "glob": "wrangler.json"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "^wrangler$"
+        }
+      ],
+      "templateFiles": [
+        "deploy-cloudflare-workers.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "Wrangler config or dependency detected.",
+      "impact": "high"
+    },
+    {
+      "id": "fly-deploy",
+      "axis": "deployment-completion",
+      "title": "Fly.io deployment",
+      "suggestionText": "This repo looks like it deploys to Fly.io. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can run flyctl deploy and confirm a healthy release.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "fly.toml"
+        },
+        {
+          "kind": "file",
+          "glob": ".fly/**"
+        }
+      ],
+      "templateFiles": [
+        "deploy-fly.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "fly.toml detected.",
+      "impact": "high"
+    },
+    {
+      "id": "aws-lambda-deploy",
+      "axis": "deployment-completion",
+      "title": "AWS Lambda deployment",
+      "suggestionText": "This repo looks like it deploys to AWS Lambda (SAM/Serverless). Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can package, deploy, and smoke-test the function.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "template.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "template.yml"
+        },
+        {
+          "kind": "file",
+          "glob": "samconfig.toml"
+        },
+        {
+          "kind": "file",
+          "glob": "serverless.yml"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "aws-lambda"
+        }
+      ],
+      "templateFiles": [
+        "deploy-aws-lambda.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "SAM/Serverless config or aws-lambda dependency detected.",
+      "impact": "high"
+    },
+    {
+      "id": "gae-deploy",
+      "axis": "deployment-completion",
+      "title": "Google App Engine deployment",
+      "suggestionText": "This repo looks like it deploys to Google App Engine. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can run gcloud app deploy and verify the served version.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "app.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "app.yml"
+        }
+      ],
+      "templateFiles": [
+        "deploy-gae.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "app.yaml detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "docker-deploy",
+      "axis": "deployment-completion",
+      "title": "Docker container deployment",
+      "suggestionText": "This repo ships a container image. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can build, scan, and push the image to your registry.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "Dockerfile"
+        },
+        {
+          "kind": "file",
+          "glob": "docker-compose.yml"
+        },
+        {
+          "kind": "file",
+          "glob": "docker-compose.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "compose.yaml"
+        }
+      ],
+      "templateFiles": [
+        "deploy-docker.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "Dockerfile or compose file detected.",
+      "impact": "high"
+    },
+    {
+      "id": "railway-deploy",
+      "axis": "deployment-completion",
+      "title": "Railway deployment",
+      "suggestionText": "This repo looks like it deploys to Railway. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can deploy and confirm the service is healthy.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "railway.json"
+        },
+        {
+          "kind": "file",
+          "glob": "railway.toml"
+        }
+      ],
+      "templateFiles": [
+        "deploy-railway.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "Railway config detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "render-deploy",
+      "axis": "deployment-completion",
+      "title": "Render deployment",
+      "suggestionText": "This repo looks like it deploys to Render. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can trigger a deploy and verify the live health check.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "render.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "render.yml"
+        }
+      ],
+      "templateFiles": [
+        "deploy-render.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "render.yaml detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "netlify-deploy",
+      "axis": "deployment-completion",
+      "title": "Netlify deployment",
+      "suggestionText": "This repo looks like it deploys to Netlify. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can build, deploy a preview, and promote to production.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "netlify.toml"
+        },
+        {
+          "kind": "file",
+          "glob": ".netlify/**"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "netlify-cli"
+        }
+      ],
+      "templateFiles": [
+        "deploy-netlify.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "Netlify config or netlify-cli dependency detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "kubernetes-deploy",
+      "axis": "deployment-completion",
+      "title": "Kubernetes deployment",
+      "suggestionText": "This repo carries Kubernetes manifests. Add a deployment capability, a verify-deployment task, and a ship-readiness checklist so the swarm can apply manifests and wait for a successful rollout.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "k8s/**/*.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "kustomization.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "Chart.yaml"
+        },
+        {
+          "kind": "file",
+          "glob": "deployment.yaml"
+        }
+      ],
+      "templateFiles": [
+        "deploy-kubernetes.md",
+        "verify-deployment-task.json",
+        "ship-readiness.json"
+      ],
+      "rationale": "Kubernetes/Helm manifests detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "drizzle-schema-doctor",
+      "axis": "skill",
+      "title": "Drizzle schema doctor",
+      "suggestionText": "This repo uses Drizzle ORM. Add a skill that audits and repairs schema + migrations: edit schema source, regenerate (never hand-edit SQL), keep enum changes coordinated, and keep migrations forward-only.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^drizzle-orm$"
+        }
+      ],
+      "templateFiles": [
+        "drizzle-schema-doctor.md"
+      ],
+      "rationale": "drizzle-orm dependency detected.",
+      "impact": "high"
+    },
+    {
+      "id": "vercel-handler-audit",
+      "axis": "skill",
+      "title": "Vercel handler audit",
+      "suggestionText": "This repo runs handlers on Vercel Functions. Add a skill that audits handlers for async-safety: no module-level mutable state, cheap import time, bounded bundle size, validated input, and centralized error handling.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^vercel$"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "^hono$"
+        },
+        {
+          "kind": "file",
+          "glob": "api/**"
+        }
+      ],
+      "templateFiles": [
+        "vercel-handler-audit.md"
+      ],
+      "rationale": "Vercel plus a handler/serverless framework detected.",
+      "impact": "high"
+    },
+    {
+      "id": "postmortem-from-prs",
+      "axis": "skill",
+      "title": "Postmortem from PRs",
+      "suggestionText": "This repo is under version control. Add a skill that reconstructs an incident or release postmortem from merged PRs, commits, and issue threads: timeline, root cause, contributing factors, and owned action items.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": ".git/**"
+        },
+        {
+          "kind": "file",
+          "glob": ".github/**"
+        }
+      ],
+      "templateFiles": [
+        "postmortem-from-prs.md"
+      ],
+      "rationale": "Git repository / GitHub remote detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "zod-validation-audit",
+      "axis": "skill",
+      "title": "Zod validation audit",
+      "suggestionText": "This repo uses Zod. Add a skill that verifies every trust boundary validates input through a schema before use, derives types from schemas, bounds user-controlled sizes, and maps failures to clean 4xx responses.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^zod$"
+        }
+      ],
+      "templateFiles": [
+        "zod-validation-audit.md"
+      ],
+      "rationale": "zod dependency detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "express-route-review",
+      "axis": "skill",
+      "title": "Express route review",
+      "suggestionText": "This repo uses Express. Add a skill that reviews routes for thin handlers, centralized error handling (no per-route try/catch), correct layer imports, and versioned mounts.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^express$"
+        }
+      ],
+      "templateFiles": [
+        "express-route-review.md"
+      ],
+      "rationale": "express dependency detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "vitest-coverage-enforcer",
+      "axis": "skill",
+      "title": "Vitest coverage enforcer",
+      "suggestionText": "This repo tests with Vitest. Add a skill that enforces meaningful coverage on changed files — happy path, one error path, one edge case minimum — with independent, behavior-focused tests run in non-watch mode.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^vitest$"
+        }
+      ],
+      "templateFiles": [
+        "vitest-coverage-enforcer.md"
+      ],
+      "rationale": "vitest dependency detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "swift-concurrency-audit",
+      "axis": "skill",
+      "title": "Swift concurrency audit",
+      "suggestionText": "This repo contains Swift code. Add a skill that audits strict-concurrency correctness: Sendable across boundaries, main-actor UI access, actor-owned shared state, and resolving Swift 6 data-race diagnostics at the source.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "Package.swift"
+        },
+        {
+          "kind": "file",
+          "glob": "**/*.swift"
+        }
+      ],
+      "templateFiles": [
+        "swift-concurrency-audit.md"
+      ],
+      "rationale": "Swift package/project detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "react-component-doctor",
+      "axis": "skill",
+      "title": "React component doctor",
+      "suggestionText": "This repo uses React. Add a skill that reviews components for hook-rule correctness, honest effect dependency arrays, stable identities/keys, cheap renders, and state living at the right level.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^react$"
+        }
+      ],
+      "templateFiles": [
+        "react-component-doctor.md"
+      ],
+      "rationale": "react dependency detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "postgres-mcp",
+      "axis": "mcp",
+      "title": "Postgres MCP server",
+      "suggestionText": "This repo talks to PostgreSQL. Register the Postgres MCP server so the swarm can introspect the schema and run read queries during planning and review. Connection comes from your existing DATABASE_URL — no credentials are written into the config.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^pg$"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "^postgres$"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "@neondatabase/serverless"
+        },
+        {
+          "kind": "env",
+          "name": "DATABASE_URL"
+        }
+      ],
+      "templateFiles": [
+        "postgres-mcp.json"
+      ],
+      "rationale": "PostgreSQL driver or DATABASE_URL detected.",
+      "impact": "high"
+    },
+    {
+      "id": "github-mcp",
+      "axis": "mcp",
+      "title": "GitHub MCP server",
+      "suggestionText": "This repo has a GitHub remote. Register the GitHub MCP server so the swarm can read issues, PRs, and commits while planning and reviewing. Auth reads from GITHUB_TOKEN — no token is written into the config.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": ".git/config"
+        },
+        {
+          "kind": "file",
+          "glob": ".github/**"
+        }
+      ],
+      "templateFiles": [
+        "github-mcp.json"
+      ],
+      "rationale": "GitHub remote / .github directory detected.",
+      "impact": "high"
+    },
+    {
+      "id": "vercel-mcp",
+      "axis": "mcp",
+      "title": "Vercel MCP server",
+      "suggestionText": "This repo deploys to Vercel. Register the Vercel MCP server so the swarm can inspect projects, deployments, and build logs. Uses Vercel's hosted endpoint via mcp-remote; auth happens through the browser OAuth flow on first connect.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "vercel.json"
+        },
+        {
+          "kind": "file",
+          "glob": "vercel.ts"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "^vercel$"
+        },
+        {
+          "kind": "file",
+          "glob": ".vercel/**"
+        }
+      ],
+      "templateFiles": [
+        "vercel-mcp.json"
+      ],
+      "rationale": "Vercel config, dependency, or .vercel directory detected.",
+      "impact": "high"
+    },
+    {
+      "id": "neon-mcp",
+      "axis": "mcp",
+      "title": "Neon MCP server",
+      "suggestionText": "This repo uses Neon Postgres. Register the Neon MCP server so the swarm can manage branches, run migrations against preview branches, and query the database. NEON_API_KEY reads from env — no key is written into the config.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "@neondatabase/serverless"
+        },
+        {
+          "kind": "env",
+          "name": "NEON_API_KEY"
+        },
+        {
+          "kind": "env",
+          "name": "NEON_DATABASE_URL"
+        }
+      ],
+      "templateFiles": [
+        "neon-mcp.json"
+      ],
+      "rationale": "Neon serverless driver or Neon connection string detected.",
+      "impact": "high"
+    },
+    {
+      "id": "sentry-mcp",
+      "axis": "mcp",
+      "title": "Sentry MCP server",
+      "suggestionText": "This repo reports to Sentry. Register the Sentry MCP server so the swarm can pull issues, stack traces, and release health while triaging and verifying fixes. SENTRY_AUTH_TOKEN reads from env — no token is written into the config.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "@sentry/"
+        },
+        {
+          "kind": "file",
+          "glob": ".sentryclirc"
+        }
+      ],
+      "templateFiles": [
+        "sentry-mcp.json"
+      ],
+      "rationale": "Sentry SDK or .sentryclirc detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "playwright-mcp",
+      "axis": "mcp",
+      "title": "Playwright MCP server",
+      "suggestionText": "This repo uses Playwright. Register the Playwright MCP server so the swarm can drive a real browser to reproduce bugs and verify UI behavior end-to-end. No credentials required.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "^playwright$"
+        },
+        {
+          "kind": "dependency",
+          "pattern": "@playwright/test"
+        }
+      ],
+      "templateFiles": [
+        "playwright-mcp.json"
+      ],
+      "rationale": "Playwright dependency detected.",
+      "impact": "medium"
+    },
+    {
+      "id": "slack-mcp",
+      "axis": "mcp",
+      "title": "Slack MCP server",
+      "suggestionText": "Your environment carries a Slack bot token. Register the Slack MCP server so the swarm can read and search channels for context during incident triage and release notes. SLACK_BOT_TOKEN reads from env — no token is written into the config.",
+      "detection": [
+        {
+          "kind": "dependency",
+          "pattern": "@slack/(bolt|web-api|types)"
+        },
+        {
+          "kind": "env",
+          "name": "SLACK_BOT_TOKEN"
+        }
+      ],
+      "templateFiles": [
+        "slack-mcp.json"
+      ],
+      "rationale": "SLACK_BOT_TOKEN present in environment.",
+      "impact": "low"
+    },
+    {
+      "id": "filesystem-mcp",
+      "axis": "mcp",
+      "title": "Filesystem MCP server",
+      "suggestionText": "Register the Filesystem MCP server so the swarm can read and write project files through a scoped, auditable interface. Access is scoped to the project root by default; widen it deliberately.",
+      "detection": [
+        {
+          "kind": "file",
+          "glob": "package.json"
+        }
+      ],
+      "templateFiles": [
+        "filesystem-mcp.json"
+      ],
+      "rationale": "Project root detected.",
+      "impact": "low"
+    }
+  ]
+}

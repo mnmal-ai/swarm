@@ -1,0 +1,15 @@
+{
+  "name": "@mnmal-ai/swarm-task-backends",
+  "version": "1.0.0-alpha.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=verbose --reporter=json --outputFile=test-results.json --coverage --coverage.reporter=json-summary --coverage.reporter=text"
+  },
+  "dependencies": {
+    "@mnmal-ai/swarm-types": "workspace:*"
+  }
+}

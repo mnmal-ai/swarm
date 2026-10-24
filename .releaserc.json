@@ -1,0 +1,30 @@
+{
+  "branches": [{ "name": "main", "prerelease": "alpha" }],
+  "plugins": [
+    ["@semantic-release/commit-analyzer", {
+      "releaseRules": [
+        { "breaking": true, "release": "minor" }
+      ]
+    }],
+    "@semantic-release/release-notes-generator",
+    "@semantic-release/changelog",
+    ["@semantic-release/npm", { "npmPublish": false }],
+    ["@semantic-release/exec", {
+      "prepareCmd": "bash scripts/compile-release-binaries.sh ${nextRelease.version}"
+    }],
+    ["@semantic-release/github", {
+      "assets": [
+        { "path": "swarm-darwin-arm64",         "label": "swarm-darwin-arm64 (macOS Apple Silicon)" },
+        { "path": "swarm-darwin-arm64.sha256" },
+        { "path": "swarm-darwin-x64",           "label": "swarm-darwin-x64 (macOS Intel)" },
+        { "path": "swarm-darwin-x64.sha256" },
+        { "path": "swarm-linux-x64",            "label": "swarm-linux-x64 (AVX2)" },
+        { "path": "swarm-linux-x64.sha256" },
+        { "path": "swarm-linux-x64-baseline",   "label": "swarm-linux-x64-baseline (no AVX2)" },
+        { "path": "swarm-linux-x64-baseline.sha256" },
+        { "path": "swarm-linux-arm64",          "label": "swarm-linux-arm64" },
+        { "path": "swarm-linux-arm64.sha256" }
+      ]
+    }]
+  ]
+}

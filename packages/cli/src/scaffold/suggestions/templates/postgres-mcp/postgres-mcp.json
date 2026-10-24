@@ -1,0 +1,13 @@
+{
+  "$comment": "MCP config stub copied in when the postgres suggestion is accepted. Merge the entry under mcpServers into each backend's config. POSTGRES_URL reads from the existing DATABASE_URL env var; never inline a connection string here.",
+  "mcpServers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "POSTGRES_URL": "${DATABASE_URL}"
+      }
+    }
+  }
+}

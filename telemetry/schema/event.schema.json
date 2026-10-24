@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mnmal-ai/swarm/telemetry/schema/event.schema.json",
+  "title": "SwarmEvent",
+  "description": "One telemetry event per LLM invocation. Mirrors the TypeScript `SwarmEvent` interface in @mnmal-ai/swarm-types (packages/types/src/telemetry.ts). When adding fields here, mirror them in that interface; when adding them there, mirror them here. tests/integration/telemetry-contract.test.ts asserts this contract against the runtime type at build time.",
+  "type": "object",
+  "required": [
+    "id",
+    "timestamp",
+    "session_id",
+    "role",
+    "model",
+    "swarm_version",
+    "intent",
+    "swarm_files_loaded",
+    "context_tokens_used",
+    "tokens",
+    "latency_ms"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^evt-",
+      "description": "Stable identifier for this event. Conventionally `evt-{YYYY-MM-DD}-{NNNN}`."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of when the event was emitted."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Session this event belongs to. Multiple events share a session_id within a single LLM invocation chain."
+    },
+    "role": {
+      "type": "string",
+      "enum": ["worker", "reviewer", "arbiter"],
+      "description": "Which oversight role produced this event."
+    },
+    "model": {
+      "type": "object",
+      "required": ["provider", "model_id"],
+      "properties": {
+        "provider": { "type": "string", "description": "LLM provider name (e.g. \"anthropic\", \"openai\", \"ollama\")." },
+        "model_id": { "type": "string", "description": "Provider-specific model identifier." },
+        "api_version": { "type": "string", "description": "Optional API version string." }
+      },
+      "additionalProperties": false
+    },
+    "swarm_version": {
+      "type": "object",
+      "required": ["commit_sha"],
+      "properties": {
+        "commit_sha": { "type": "string", "description": "Git SHA of the swarm content at invocation time." },
+        "tag": { "type": "string", "description": "Optional git tag of the swarm content." }
+      },
+      "additionalProperties": false
+    },
+    "intent": {
+      "type": "string",
+      "description": "Classified intent (e.g. \"code-review\", \"implementation\", \"investigation\")."
+    },
+    "swarm_files_loaded": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Paths of the swarm content files the loader fed into the prompt."
+    },
+    "context_tokens_used": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Estimated tokens consumed by the assembled swarm context."
+    },
+    "tokens": {
+      "type": "object",
+      "required": ["input", "output"],
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false,
+      "description": "Tokens the invocation used: input (cache reads and writes included) and output. Swarm budgets in tokens only."
+    },
+    "latency_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock latency of the LLM invocation in milliseconds."
+    },
+    "input_summary": {
+      "type": "string",
+      "description": "Optional short summary of the prompt input. Useful in dashboards."
+    },
+    "output_summary": {
+      "type": "string",
+      "description": "Optional short summary of the model response. Useful in dashboards."
+    },
+    "authorId": {
+      "type": "string",
+      "description": "Stable identifier for the human author of the run (goal-7b). Taxonomy-only today; enforcement deferred."
+    }
+  },
+  "additionalProperties": false
+}

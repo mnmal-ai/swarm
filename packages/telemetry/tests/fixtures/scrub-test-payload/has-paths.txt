@@ -1,0 +1,2 @@
+Built from /home/user/Developer/my-app/src/main.swift
+Output to /home/user/projects/swarm/dist

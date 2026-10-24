@@ -1,0 +1,46 @@
+# Dedicated per-project Substrate Postgres: one cold store + one meta store that
+# belong to a single project, published on loopback only.
+#
+# The compose PROJECT NAME scopes the containers and volumes, so every project
+# gets its own data (volumes are <project>_swarm_substrate_data / _swarm_meta_data).
+# Ports come from the environment; swarm sets them from the project's
+# `substrate.postgres_url` / `substrate.meta_postgres_url` when it brings this up itself
+# (substrate.compose_file + substrate.compose_project in the project's config).
+#
+# By hand:
+#   SWARM_DEDICATED_PG_PORT=47337 SWARM_DEDICATED_META_PG_PORT=47340 \
+#     docker compose -p swarm-project-a -f docker-compose.dedicated.yml up -d --wait
+services:
+  swarm-substrate:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm
+    ports:
+      - "127.0.0.1:${SWARM_DEDICATED_PG_PORT:?set SWARM_DEDICATED_PG_PORT}:5432"
+    volumes:
+      - swarm_substrate_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm -d swarm"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  swarm-meta:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm_meta
+    ports:
+      - "127.0.0.1:${SWARM_DEDICATED_META_PG_PORT:?set SWARM_DEDICATED_META_PG_PORT}:5432"
+    volumes:
+      - swarm_meta_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm -d swarm_meta"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  swarm_substrate_data:
+  swarm_meta_data:

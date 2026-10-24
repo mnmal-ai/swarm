@@ -1,0 +1,3406 @@
+[
+ {
+  "name": "roomy budget, no document named",
+  "input": {
+   "documents": [
+    {
+     "path": "core/context-layers.md",
+     "source": "swarm",
+     "title": "Context Layers",
+     "tokens": 822,
+     "contentHash": "golden:core/context-layers.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The Seven Layers"
+       ],
+       "synopsis": "Swarm organizes knowledge in concentric layers, loaded from innermost (always) to outermost (budget permitting).",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": true
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Context Budget"
+       ],
+       "synopsis": "Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).",
+       "tokens": 141,
+       "startLine": 17,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "How Routing Works"
+       ],
+       "synopsis": "At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.",
+       "tokens": 281,
+       "startLine": 31,
+       "endLine": 50,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Skills Tiers"
+       ],
+       "synopsis": "Third-party knowledge is organized by trust level:",
+       "tokens": 118,
+       "startLine": 51,
+       "endLine": 60,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "domains/example/oversight.md",
+     "source": "swarm",
+     "title": "Oversight",
+     "tokens": 939,
+     "contentHash": "golden:domains/example/oversight.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Agent Roles"
+       ],
+       "synopsis": "Swarm uses a multi-agent oversight chain where separate agents validate each other's work.",
+       "tokens": 256,
+       "startLine": 1,
+       "endLine": 17,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The Chain"
+       ],
+       "synopsis": "The Chain",
+       "tokens": 137,
+       "startLine": 18,
+       "endLine": 38,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Review Policy"
+       ],
+       "synopsis": "Defined in `oversight/review-policy.json`.",
+       "tokens": 121,
+       "startLine": 39,
+       "endLine": 57,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Disagreement Handling"
+       ],
+       "synopsis": "Severity | Examples | Action",
+       "tokens": 426,
+       "startLine": 58,
+       "endLine": 89,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/context-sections-design.md",
+     "source": "project",
+     "title": "Swarm context: sections, index and pull",
+     "tokens": 3123,
+     "contentHash": "golden:docs/specs/context-sections-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "**Date:** 2026-10-01 · **Status:** approved; stage 2 implemented",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 14,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Background"
+       ],
+       "synopsis": "In the measured baseline run (854 model calls, about 44k tokens of context per call, 97% of input as cache reads), context came from three places:",
+       "tokens": 243,
+       "startLine": 15,
+       "endLine": 24,
+       "loaded": true
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Part 1: documents as sections"
+       ],
+       "synopsis": "Swarm defines two types, `Document` and `Section`, in a namespace of their own (`swarm-docs`, unique across a Helix instance), in the coordinator plugin swarm…",
+       "tokens": 730,
+       "startLine": 25,
+       "endLine": 45,
+       "loaded": true
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Part 2: push an index, pull the rest"
+       ],
+       "synopsis": "A session starts with three blocks: the required core, the loaded sections under their document and heading paths, and an index of the stored documents in a…",
+       "tokens": 525,
+       "startLine": 46,
+       "endLine": 55,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Part 3: ranking by relevance"
+       ],
+       "synopsis": "Sections are ranked against the task by a local bge-m3 model at 1024 dimensions through Ollama on the same machine, so no document text leaves it.",
+       "tokens": 266,
+       "startLine": 56,
+       "endLine": 64,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Keeping agents on the pull path"
+       ],
+       "synopsis": "The index header says to read only the sections needed, and what is refused.",
+       "tokens": 289,
+       "startLine": 65,
+       "endLine": 68,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Isolation, failures and settings"
+       ],
+       "synopsis": "Everything stays on the project's own Helix and the local machine.",
+       "tokens": 250,
+       "startLine": 69,
+       "endLine": 89,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Rollout"
+       ],
+       "synopsis": "Each stage is its own PR, ships switched off, and must beat the baseline on the same kind of run before the next starts.",
+       "tokens": 214,
+       "startLine": 90,
+       "endLine": 101,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Decisions"
+       ],
+       "synopsis": "# | Decision | Outcome",
+       "tokens": 213,
+       "startLine": 102,
+       "endLine": 115,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Known issues left for later"
+       ],
+       "synopsis": "Budget and route rows are only inserted when missing, so editing `swarm.json` never updates them.",
+       "tokens": 113,
+       "startLine": 116,
+       "endLine": 122,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/project-structure.md",
+     "source": "project",
+     "title": "Project Structure",
+     "tokens": 2630,
+     "contentHash": "golden:docs/project-structure.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The `.swarm/` Directory"
+       ],
+       "synopsis": "`swarm init` creates a `.swarm/` directory in your project with structured context files.",
+       "tokens": 656,
+       "startLine": 1,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Helix Seeding"
+       ],
+       "synopsis": "The `.swarm/` directory is the authoring format.",
+       "tokens": 173,
+       "startLine": 54,
+       "endLine": 66,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Key Files"
+       ],
+       "synopsis": "The router manifest.",
+       "tokens": 1689,
+       "startLine": 67,
+       "endLine": 194,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Generated Skill Files"
+       ],
+       "synopsis": "`swarm init` also creates a skill file for your AI tool (outside `.swarm/`):",
+       "tokens": 112,
+       "startLine": 195,
+       "endLine": 207,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/sdk-api.md",
+     "source": "project",
+     "title": "SDK API",
+     "tokens": 1088,
+     "contentHash": "golden:docs/sdk-api.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Basic Usage"
+       ],
+       "synopsis": "The Swarm SDK can be used programmatically in TypeScript applications.",
+       "tokens": 278,
+       "startLine": 1,
+       "endLine": 33,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "HelixClient"
+       ],
+       "synopsis": "The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).",
+       "tokens": 204,
+       "startLine": 34,
+       "endLine": 58,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "With Oversight"
+       ],
+       "synopsis": "With Oversight",
+       "tokens": 130,
+       "startLine": 59,
+       "endLine": 73,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Benchmarking"
+       ],
+       "synopsis": "Run behavioral tests across models to compare quality:",
+       "tokens": 144,
+       "startLine": 74,
+       "endLine": 99,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Multi-Task Workflows"
+       ],
+       "synopsis": "The orchestrator manages goals that contain multiple tasks with dependencies.",
+       "tokens": 333,
+       "startLine": 100,
+       "endLine": 138,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/extending-suggestions.md",
+     "source": "project",
+     "title": "Extending the Suggestion Catalog",
+     "tokens": 3227,
+     "contentHash": "golden:docs/extending-suggestions.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "The suggestion catalog powers `/prepare-for-swarm`.",
+       "tokens": 200,
+       "startLine": 1,
+       "endLine": 15,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The `CatalogEntry` schema"
+       ],
+       "synopsis": "One entry is one suggestion.",
+       "tokens": 310,
+       "startLine": 16,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "The three axes"
+       ],
+       "synopsis": "`SuggestionAxis` is derived from the `SUGGESTION_AXES` const array — a closed set of exactly three string identifiers:",
+       "tokens": 174,
+       "startLine": 31,
+       "endLine": 46,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Detection signals"
+       ],
+       "synopsis": "A `DetectionSignal` decides whether an entry is relevant to the current repo.",
+       "tokens": 349,
+       "startLine": 47,
+       "endLine": 81,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Template files"
+       ],
+       "synopsis": "Each entry's template files live in `suggestions/templates/<entry-id>/`.",
+       "tokens": 296,
+       "startLine": 82,
+       "endLine": 105,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Worked example: adding a `biome-lint-enforcer` skill"
+       ],
+       "synopsis": "This walks through one real entry end to end.",
+       "tokens": 1119,
+       "startLine": 106,
+       "endLine": 217,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Rationale and design decisions"
+       ],
+       "synopsis": "The matcher can offer at most 4–5 entries per axis (see [The three axes](#the-three-axes), where the cap is stated alongside the axis definitions).",
+       "tokens": 780,
+       "startLine": 218,
+       "endLine": 271,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/helix-integration-design.md",
+     "source": "project",
+     "title": "Helix Integration — Swarm SDK Design Spec",
+     "tokens": 5940,
+     "contentHash": "golden:docs/specs/helix-integration-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Problem"
+       ],
+       "synopsis": "**Date:** 2026-04-01 **Author:** example-user + Claude Opus 4.6 **Branch:** `feat/helix-integration` (@mnmal-ai/swarm) **Status:** Draft — pending approval",
+       "tokens": 262,
+       "startLine": 1,
+       "endLine": 19,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Solution"
+       ],
+       "synopsis": "Replace the Swarm SDK's file-based storage and string-based data exchange with Helix — a typed data resolution framework with schema-as-codebook, positional…",
+       "tokens": 159,
+       "startLine": 20,
+       "endLine": 27,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Non-Goals"
+       ],
+       "synopsis": "Replacing the LLM prompt format.",
+       "tokens": 1106,
+       "startLine": 28,
+       "endLine": 130,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Phase 1: Swarm Content as Helix Types"
+       ],
+       "synopsis": "**SwarmContent** — One entity per swarm file (values.md, modes/code-review.md, etc.)",
+       "tokens": 1069,
+       "startLine": 131,
+       "endLine": 237,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Phase 2: Typed Oversight Transport"
+       ],
+       "synopsis": "**WorkerResult** — Created after each Worker execution",
+       "tokens": 816,
+       "startLine": 238,
+       "endLine": 328,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Phase 3: Telemetry as Helix Entities"
+       ],
+       "synopsis": "**SessionEvent** — Replaces SwarmEvent JSONL",
+       "tokens": 703,
+       "startLine": 329,
+       "endLine": 431,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Phase 4: Orchestrator Negotiation via Schema"
+       ],
+       "synopsis": "**Goal** — Replaces goals.json on disk",
+       "tokens": 722,
+       "startLine": 432,
+       "endLine": 510,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Human Readability Constraint"
+       ],
+       "synopsis": "All Helix data must be renderable as human-readable text via the CLI.",
+       "tokens": 278,
+       "startLine": 511,
+       "endLine": 529,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Propose Batch Strategy"
+       ],
+       "synopsis": "All swarm types must be proposed in the correct order, with cross-references within the same batch where possible.",
+       "tokens": 370,
+       "startLine": 530,
+       "endLine": 585,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Validation Test"
+       ],
+       "synopsis": "After all 4 phases are complete:",
+       "tokens": 165,
+       "startLine": 586,
+       "endLine": 601,
+       "loaded": false
+      },
+      {
+       "ordinal": 10,
+       "headingPath": [
+        "Known Limitations (PoC Scope)"
+       ],
+       "synopsis": "**Auto-CRUD filtering:** Only `id` and `limit` work server-side.",
+       "tokens": 290,
+       "startLine": 602,
+       "endLine": 611,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/orchestrator-intelligence-design.md",
+     "source": "project",
+     "title": "Swarm SDK — Orchestrator Intelligence Improvements",
+     "tokens": 3588,
+     "contentHash": "golden:docs/specs/orchestrator-intelligence-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Context"
+       ],
+       "synopsis": "**Date:** 2026-03-23 **Status:** Approved **Incident:** Swarm run on sample-project-a spent $46.15, produced 45% completion (blank page), left ~20 vitest…",
+       "tokens": 243,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Approach"
+       ],
+       "synopsis": "Three PRs grouped by subsystem:",
+       "tokens": 425,
+       "startLine": 17,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "PR 2: Orchestrator Core — Dispatch Intelligence"
+       ],
+       "synopsis": "Four interconnected changes to how the orchestrator dispatches and schedules work.",
+       "tokens": 1745,
+       "startLine": 54,
+       "endLine": 181,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "PR 3: Validation Layer — Completion Intelligence"
+       ],
+       "synopsis": "Two changes to how the orchestrator judges whether a goal is truly complete.",
+       "tokens": 867,
+       "startLine": 182,
+       "endLine": 269,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Summary of changes by file"
+       ],
+       "synopsis": "File | PR | Changes",
+       "tokens": 178,
+       "startLine": 270,
+       "endLine": 280,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Testing strategy"
+       ],
+       "synopsis": "**PR 1:** Unit test: scaffold a swarm with a route referencing a non-existent file, verify stub is created and warning printed.",
+       "tokens": 131,
+       "startLine": 281,
+       "endLine": 286,
+       "loaded": false
+      }
+     ]
+    }
+   ],
+   "budgetTokens": 200000,
+   "taskText": "Add a retry to the sync loop.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 4000
+  },
+  "output": {
+   "text": "## Documents\n\nThese documents are stored by section. Read only the sections you need: `L41–120` means Read with offset 41 and limit 80. A read that spans several sections and more than 4,000 tokens is refused, with the document's sections and their line ranges.\n\n### /home/dev/project/.swarm/core/context-layers.md (822 tok) — Context Layers\n- L17–30 Context Budget (141 tok) — Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).\n- L31–50 How Routing Works (281 tok) — At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.\n- L51–60 Skills Tiers (118 tok) — Third-party knowledge is organized by trust level:\n\n### /home/dev/project/.swarm/domains/example/oversight.md (939 tok) — Oversight\n- L1–17 Agent Roles (256 tok) — Swarm uses a multi-agent oversight chain where separate agents validate each other's work.\n- L18–38 The Chain (137 tok) — The Chain\n- L39–57 Review Policy (121 tok) — Defined in `oversight/review-policy.json`.\n- L58–89 Disagreement Handling (426 tok) — Severity | Examples | Action\n\n- docs/extending-suggestions.md (3,227 tok, 7 sections) — Extending the Suggestion Catalog\n- docs/project-structure.md (2,630 tok, 4 sections) — Project Structure\n- docs/sdk-api.md (1,088 tok, 5 sections) — SDK API\n- docs/specs/context-sections-design.md (3,123 tok, 10 sections) — Swarm context: sections, index and pull\n- docs/specs/helix-integration-design.md (5,940 tok, 11 sections) — Helix Integration — Swarm SDK Design Spec\n- docs/specs/orchestrator-intelligence-design.md (3,588 tok, 6 sections) — Swarm SDK — Orchestrator Intelligence Improvements",
+   "tokens": 409,
+   "documents": 8,
+   "expanded": 2,
+   "folded": 6,
+   "dropped": 0
+  }
+ },
+ {
+  "name": "task names two documents, by path and by file name",
+  "input": {
+   "documents": [
+    {
+     "path": "core/context-layers.md",
+     "source": "swarm",
+     "title": "Context Layers",
+     "tokens": 822,
+     "contentHash": "golden:core/context-layers.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The Seven Layers"
+       ],
+       "synopsis": "Swarm organizes knowledge in concentric layers, loaded from innermost (always) to outermost (budget permitting).",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": true
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Context Budget"
+       ],
+       "synopsis": "Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).",
+       "tokens": 141,
+       "startLine": 17,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "How Routing Works"
+       ],
+       "synopsis": "At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.",
+       "tokens": 281,
+       "startLine": 31,
+       "endLine": 50,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Skills Tiers"
+       ],
+       "synopsis": "Third-party knowledge is organized by trust level:",
+       "tokens": 118,
+       "startLine": 51,
+       "endLine": 60,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "domains/example/oversight.md",
+     "source": "swarm",
+     "title": "Oversight",
+     "tokens": 939,
+     "contentHash": "golden:domains/example/oversight.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Agent Roles"
+       ],
+       "synopsis": "Swarm uses a multi-agent oversight chain where separate agents validate each other's work.",
+       "tokens": 256,
+       "startLine": 1,
+       "endLine": 17,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The Chain"
+       ],
+       "synopsis": "The Chain",
+       "tokens": 137,
+       "startLine": 18,
+       "endLine": 38,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Review Policy"
+       ],
+       "synopsis": "Defined in `oversight/review-policy.json`.",
+       "tokens": 121,
+       "startLine": 39,
+       "endLine": 57,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Disagreement Handling"
+       ],
+       "synopsis": "Severity | Examples | Action",
+       "tokens": 426,
+       "startLine": 58,
+       "endLine": 89,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/context-sections-design.md",
+     "source": "project",
+     "title": "Swarm context: sections, index and pull",
+     "tokens": 3123,
+     "contentHash": "golden:docs/specs/context-sections-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "**Date:** 2026-10-01 · **Status:** approved; stage 2 implemented",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 14,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Background"
+       ],
+       "synopsis": "In the measured baseline run (854 model calls, about 44k tokens of context per call, 97% of input as cache reads), context came from three places:",
+       "tokens": 243,
+       "startLine": 15,
+       "endLine": 24,
+       "loaded": true
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Part 1: documents as sections"
+       ],
+       "synopsis": "Swarm defines two types, `Document` and `Section`, in a namespace of their own (`swarm-docs`, unique across a Helix instance), in the coordinator plugin swarm…",
+       "tokens": 730,
+       "startLine": 25,
+       "endLine": 45,
+       "loaded": true
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Part 2: push an index, pull the rest"
+       ],
+       "synopsis": "A session starts with three blocks: the required core, the loaded sections under their document and heading paths, and an index of the stored documents in a…",
+       "tokens": 525,
+       "startLine": 46,
+       "endLine": 55,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Part 3: ranking by relevance"
+       ],
+       "synopsis": "Sections are ranked against the task by a local bge-m3 model at 1024 dimensions through Ollama on the same machine, so no document text leaves it.",
+       "tokens": 266,
+       "startLine": 56,
+       "endLine": 64,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Keeping agents on the pull path"
+       ],
+       "synopsis": "The index header says to read only the sections needed, and what is refused.",
+       "tokens": 289,
+       "startLine": 65,
+       "endLine": 68,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Isolation, failures and settings"
+       ],
+       "synopsis": "Everything stays on the project's own Helix and the local machine.",
+       "tokens": 250,
+       "startLine": 69,
+       "endLine": 89,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Rollout"
+       ],
+       "synopsis": "Each stage is its own PR, ships switched off, and must beat the baseline on the same kind of run before the next starts.",
+       "tokens": 214,
+       "startLine": 90,
+       "endLine": 101,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Decisions"
+       ],
+       "synopsis": "# | Decision | Outcome",
+       "tokens": 213,
+       "startLine": 102,
+       "endLine": 115,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Known issues left for later"
+       ],
+       "synopsis": "Budget and route rows are only inserted when missing, so editing `swarm.json` never updates them.",
+       "tokens": 113,
+       "startLine": 116,
+       "endLine": 122,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/project-structure.md",
+     "source": "project",
+     "title": "Project Structure",
+     "tokens": 2630,
+     "contentHash": "golden:docs/project-structure.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The `.swarm/` Directory"
+       ],
+       "synopsis": "`swarm init` creates a `.swarm/` directory in your project with structured context files.",
+       "tokens": 656,
+       "startLine": 1,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Helix Seeding"
+       ],
+       "synopsis": "The `.swarm/` directory is the authoring format.",
+       "tokens": 173,
+       "startLine": 54,
+       "endLine": 66,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Key Files"
+       ],
+       "synopsis": "The router manifest.",
+       "tokens": 1689,
+       "startLine": 67,
+       "endLine": 194,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Generated Skill Files"
+       ],
+       "synopsis": "`swarm init` also creates a skill file for your AI tool (outside `.swarm/`):",
+       "tokens": 112,
+       "startLine": 195,
+       "endLine": 207,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/sdk-api.md",
+     "source": "project",
+     "title": "SDK API",
+     "tokens": 1088,
+     "contentHash": "golden:docs/sdk-api.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Basic Usage"
+       ],
+       "synopsis": "The Swarm SDK can be used programmatically in TypeScript applications.",
+       "tokens": 278,
+       "startLine": 1,
+       "endLine": 33,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "HelixClient"
+       ],
+       "synopsis": "The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).",
+       "tokens": 204,
+       "startLine": 34,
+       "endLine": 58,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "With Oversight"
+       ],
+       "synopsis": "With Oversight",
+       "tokens": 130,
+       "startLine": 59,
+       "endLine": 73,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Benchmarking"
+       ],
+       "synopsis": "Run behavioral tests across models to compare quality:",
+       "tokens": 144,
+       "startLine": 74,
+       "endLine": 99,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Multi-Task Workflows"
+       ],
+       "synopsis": "The orchestrator manages goals that contain multiple tasks with dependencies.",
+       "tokens": 333,
+       "startLine": 100,
+       "endLine": 138,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/extending-suggestions.md",
+     "source": "project",
+     "title": "Extending the Suggestion Catalog",
+     "tokens": 3227,
+     "contentHash": "golden:docs/extending-suggestions.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "The suggestion catalog powers `/prepare-for-swarm`.",
+       "tokens": 200,
+       "startLine": 1,
+       "endLine": 15,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The `CatalogEntry` schema"
+       ],
+       "synopsis": "One entry is one suggestion.",
+       "tokens": 310,
+       "startLine": 16,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "The three axes"
+       ],
+       "synopsis": "`SuggestionAxis` is derived from the `SUGGESTION_AXES` const array — a closed set of exactly three string identifiers:",
+       "tokens": 174,
+       "startLine": 31,
+       "endLine": 46,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Detection signals"
+       ],
+       "synopsis": "A `DetectionSignal` decides whether an entry is relevant to the current repo.",
+       "tokens": 349,
+       "startLine": 47,
+       "endLine": 81,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Template files"
+       ],
+       "synopsis": "Each entry's template files live in `suggestions/templates/<entry-id>/`.",
+       "tokens": 296,
+       "startLine": 82,
+       "endLine": 105,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Worked example: adding a `biome-lint-enforcer` skill"
+       ],
+       "synopsis": "This walks through one real entry end to end.",
+       "tokens": 1119,
+       "startLine": 106,
+       "endLine": 217,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Rationale and design decisions"
+       ],
+       "synopsis": "The matcher can offer at most 4–5 entries per axis (see [The three axes](#the-three-axes), where the cap is stated alongside the axis definitions).",
+       "tokens": 780,
+       "startLine": 218,
+       "endLine": 271,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/helix-integration-design.md",
+     "source": "project",
+     "title": "Helix Integration — Swarm SDK Design Spec",
+     "tokens": 5940,
+     "contentHash": "golden:docs/specs/helix-integration-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Problem"
+       ],
+       "synopsis": "**Date:** 2026-04-01 **Author:** example-user + Claude Opus 4.6 **Branch:** `feat/helix-integration` (@mnmal-ai/swarm) **Status:** Draft — pending approval",
+       "tokens": 262,
+       "startLine": 1,
+       "endLine": 19,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Solution"
+       ],
+       "synopsis": "Replace the Swarm SDK's file-based storage and string-based data exchange with Helix — a typed data resolution framework with schema-as-codebook, positional…",
+       "tokens": 159,
+       "startLine": 20,
+       "endLine": 27,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Non-Goals"
+       ],
+       "synopsis": "Replacing the LLM prompt format.",
+       "tokens": 1106,
+       "startLine": 28,
+       "endLine": 130,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Phase 1: Swarm Content as Helix Types"
+       ],
+       "synopsis": "**SwarmContent** — One entity per swarm file (values.md, modes/code-review.md, etc.)",
+       "tokens": 1069,
+       "startLine": 131,
+       "endLine": 237,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Phase 2: Typed Oversight Transport"
+       ],
+       "synopsis": "**WorkerResult** — Created after each Worker execution",
+       "tokens": 816,
+       "startLine": 238,
+       "endLine": 328,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Phase 3: Telemetry as Helix Entities"
+       ],
+       "synopsis": "**SessionEvent** — Replaces SwarmEvent JSONL",
+       "tokens": 703,
+       "startLine": 329,
+       "endLine": 431,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Phase 4: Orchestrator Negotiation via Schema"
+       ],
+       "synopsis": "**Goal** — Replaces goals.json on disk",
+       "tokens": 722,
+       "startLine": 432,
+       "endLine": 510,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Human Readability Constraint"
+       ],
+       "synopsis": "All Helix data must be renderable as human-readable text via the CLI.",
+       "tokens": 278,
+       "startLine": 511,
+       "endLine": 529,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Propose Batch Strategy"
+       ],
+       "synopsis": "All swarm types must be proposed in the correct order, with cross-references within the same batch where possible.",
+       "tokens": 370,
+       "startLine": 530,
+       "endLine": 585,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Validation Test"
+       ],
+       "synopsis": "After all 4 phases are complete:",
+       "tokens": 165,
+       "startLine": 586,
+       "endLine": 601,
+       "loaded": false
+      },
+      {
+       "ordinal": 10,
+       "headingPath": [
+        "Known Limitations (PoC Scope)"
+       ],
+       "synopsis": "**Auto-CRUD filtering:** Only `id` and `limit` work server-side.",
+       "tokens": 290,
+       "startLine": 602,
+       "endLine": 611,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/orchestrator-intelligence-design.md",
+     "source": "project",
+     "title": "Swarm SDK — Orchestrator Intelligence Improvements",
+     "tokens": 3588,
+     "contentHash": "golden:docs/specs/orchestrator-intelligence-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Context"
+       ],
+       "synopsis": "**Date:** 2026-03-23 **Status:** Approved **Incident:** Swarm run on sample-project-a spent $46.15, produced 45% completion (blank page), left ~20 vitest…",
+       "tokens": 243,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Approach"
+       ],
+       "synopsis": "Three PRs grouped by subsystem:",
+       "tokens": 425,
+       "startLine": 17,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "PR 2: Orchestrator Core — Dispatch Intelligence"
+       ],
+       "synopsis": "Four interconnected changes to how the orchestrator dispatches and schedules work.",
+       "tokens": 1745,
+       "startLine": 54,
+       "endLine": 181,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "PR 3: Validation Layer — Completion Intelligence"
+       ],
+       "synopsis": "Two changes to how the orchestrator judges whether a goal is truly complete.",
+       "tokens": 867,
+       "startLine": 182,
+       "endLine": 269,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Summary of changes by file"
+       ],
+       "synopsis": "File | PR | Changes",
+       "tokens": 178,
+       "startLine": 270,
+       "endLine": 280,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Testing strategy"
+       ],
+       "synopsis": "**PR 1:** Unit test: scaffold a swarm with a route referencing a non-existent file, verify stub is created and warning printed.",
+       "tokens": 131,
+       "startLine": 281,
+       "endLine": 286,
+       "loaded": false
+      }
+     ]
+    }
+   ],
+   "budgetTokens": 60000,
+   "taskText": "Follow docs/sdk-api.md and check project-structure.md first.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 4000
+  },
+  "output": {
+   "text": "## Documents\n\nThese documents are stored by section. Read only the sections you need: `L41–120` means Read with offset 41 and limit 80. A read that spans several sections and more than 4,000 tokens is refused, with the document's sections and their line ranges.\n\n### docs/sdk-api.md (1,088 tok) — SDK API\n- L1–33 Basic Usage (278 tok) — The Swarm SDK can be used programmatically in TypeScript applications.\n- L34–58 HelixClient (204 tok) — The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).\n- L59–73 With Oversight (130 tok) — With Oversight\n- L74–99 Benchmarking (144 tok) — Run behavioral tests across models to compare quality:\n- L100–138 Multi-Task Workflows (333 tok) — The orchestrator manages goals that contain multiple tasks with dependencies.\n\n### docs/project-structure.md (2,630 tok) — Project Structure\n- L1–53 The `.swarm/` Directory (656 tok) — `swarm init` creates a `.swarm/` directory in your project with structured context files.\n- L54–66 Helix Seeding (173 tok) — The `.swarm/` directory is the authoring format.\n- L67–194 Key Files (1,689 tok) — The router manifest.\n- L195–207 Generated Skill Files (112 tok) — `swarm init` also creates a skill file for your AI tool (outside `.swarm/`):\n\n### /home/dev/project/.swarm/core/context-layers.md (822 tok) — Context Layers\n- L17–30 Context Budget (141 tok) — Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).\n- L31–50 How Routing Works (281 tok) — At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.\n- L51–60 Skills Tiers (118 tok) — Third-party knowledge is organized by trust level:\n\n### /home/dev/project/.swarm/domains/example/oversight.md (939 tok) — Oversight\n- L1–17 Agent Roles (256 tok) — Swarm uses a multi-agent oversight chain where separate agents validate each other's work.\n- L18–38 The Chain (137 tok) — The Chain\n- L39–57 Review Policy (121 tok) — Defined in `oversight/review-policy.json`.\n- L58–89 Disagreement Handling (426 tok) — Severity | Examples | Action\n\n- docs/extending-suggestions.md (3,227 tok, 7 sections) — Extending the Suggestion Catalog\n- docs/specs/context-sections-design.md (3,123 tok, 10 sections) — Swarm context: sections, index and pull\n- docs/specs/helix-integration-design.md (5,940 tok, 11 sections) — Helix Integration — Swarm SDK Design Spec\n- docs/specs/orchestrator-intelligence-design.md (3,588 tok, 6 sections) — Swarm SDK — Orchestrator Intelligence Improvements",
+   "tokens": 625,
+   "documents": 8,
+   "expanded": 4,
+   "folded": 4,
+   "dropped": 0
+  }
+ },
+ {
+  "name": "tight budget folds most documents",
+  "input": {
+   "documents": [
+    {
+     "path": "core/context-layers.md",
+     "source": "swarm",
+     "title": "Context Layers",
+     "tokens": 822,
+     "contentHash": "golden:core/context-layers.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The Seven Layers"
+       ],
+       "synopsis": "Swarm organizes knowledge in concentric layers, loaded from innermost (always) to outermost (budget permitting).",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": true
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Context Budget"
+       ],
+       "synopsis": "Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).",
+       "tokens": 141,
+       "startLine": 17,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "How Routing Works"
+       ],
+       "synopsis": "At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.",
+       "tokens": 281,
+       "startLine": 31,
+       "endLine": 50,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Skills Tiers"
+       ],
+       "synopsis": "Third-party knowledge is organized by trust level:",
+       "tokens": 118,
+       "startLine": 51,
+       "endLine": 60,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "domains/example/oversight.md",
+     "source": "swarm",
+     "title": "Oversight",
+     "tokens": 939,
+     "contentHash": "golden:domains/example/oversight.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Agent Roles"
+       ],
+       "synopsis": "Swarm uses a multi-agent oversight chain where separate agents validate each other's work.",
+       "tokens": 256,
+       "startLine": 1,
+       "endLine": 17,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The Chain"
+       ],
+       "synopsis": "The Chain",
+       "tokens": 137,
+       "startLine": 18,
+       "endLine": 38,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Review Policy"
+       ],
+       "synopsis": "Defined in `oversight/review-policy.json`.",
+       "tokens": 121,
+       "startLine": 39,
+       "endLine": 57,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Disagreement Handling"
+       ],
+       "synopsis": "Severity | Examples | Action",
+       "tokens": 426,
+       "startLine": 58,
+       "endLine": 89,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/context-sections-design.md",
+     "source": "project",
+     "title": "Swarm context: sections, index and pull",
+     "tokens": 3123,
+     "contentHash": "golden:docs/specs/context-sections-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "**Date:** 2026-10-01 · **Status:** approved; stage 2 implemented",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 14,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Background"
+       ],
+       "synopsis": "In the measured baseline run (854 model calls, about 44k tokens of context per call, 97% of input as cache reads), context came from three places:",
+       "tokens": 243,
+       "startLine": 15,
+       "endLine": 24,
+       "loaded": true
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Part 1: documents as sections"
+       ],
+       "synopsis": "Swarm defines two types, `Document` and `Section`, in a namespace of their own (`swarm-docs`, unique across a Helix instance), in the coordinator plugin swarm…",
+       "tokens": 730,
+       "startLine": 25,
+       "endLine": 45,
+       "loaded": true
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Part 2: push an index, pull the rest"
+       ],
+       "synopsis": "A session starts with three blocks: the required core, the loaded sections under their document and heading paths, and an index of the stored documents in a…",
+       "tokens": 525,
+       "startLine": 46,
+       "endLine": 55,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Part 3: ranking by relevance"
+       ],
+       "synopsis": "Sections are ranked against the task by a local bge-m3 model at 1024 dimensions through Ollama on the same machine, so no document text leaves it.",
+       "tokens": 266,
+       "startLine": 56,
+       "endLine": 64,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Keeping agents on the pull path"
+       ],
+       "synopsis": "The index header says to read only the sections needed, and what is refused.",
+       "tokens": 289,
+       "startLine": 65,
+       "endLine": 68,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Isolation, failures and settings"
+       ],
+       "synopsis": "Everything stays on the project's own Helix and the local machine.",
+       "tokens": 250,
+       "startLine": 69,
+       "endLine": 89,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Rollout"
+       ],
+       "synopsis": "Each stage is its own PR, ships switched off, and must beat the baseline on the same kind of run before the next starts.",
+       "tokens": 214,
+       "startLine": 90,
+       "endLine": 101,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Decisions"
+       ],
+       "synopsis": "# | Decision | Outcome",
+       "tokens": 213,
+       "startLine": 102,
+       "endLine": 115,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Known issues left for later"
+       ],
+       "synopsis": "Budget and route rows are only inserted when missing, so editing `swarm.json` never updates them.",
+       "tokens": 113,
+       "startLine": 116,
+       "endLine": 122,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/project-structure.md",
+     "source": "project",
+     "title": "Project Structure",
+     "tokens": 2630,
+     "contentHash": "golden:docs/project-structure.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The `.swarm/` Directory"
+       ],
+       "synopsis": "`swarm init` creates a `.swarm/` directory in your project with structured context files.",
+       "tokens": 656,
+       "startLine": 1,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Helix Seeding"
+       ],
+       "synopsis": "The `.swarm/` directory is the authoring format.",
+       "tokens": 173,
+       "startLine": 54,
+       "endLine": 66,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Key Files"
+       ],
+       "synopsis": "The router manifest.",
+       "tokens": 1689,
+       "startLine": 67,
+       "endLine": 194,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Generated Skill Files"
+       ],
+       "synopsis": "`swarm init` also creates a skill file for your AI tool (outside `.swarm/`):",
+       "tokens": 112,
+       "startLine": 195,
+       "endLine": 207,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/sdk-api.md",
+     "source": "project",
+     "title": "SDK API",
+     "tokens": 1088,
+     "contentHash": "golden:docs/sdk-api.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Basic Usage"
+       ],
+       "synopsis": "The Swarm SDK can be used programmatically in TypeScript applications.",
+       "tokens": 278,
+       "startLine": 1,
+       "endLine": 33,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "HelixClient"
+       ],
+       "synopsis": "The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).",
+       "tokens": 204,
+       "startLine": 34,
+       "endLine": 58,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "With Oversight"
+       ],
+       "synopsis": "With Oversight",
+       "tokens": 130,
+       "startLine": 59,
+       "endLine": 73,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Benchmarking"
+       ],
+       "synopsis": "Run behavioral tests across models to compare quality:",
+       "tokens": 144,
+       "startLine": 74,
+       "endLine": 99,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Multi-Task Workflows"
+       ],
+       "synopsis": "The orchestrator manages goals that contain multiple tasks with dependencies.",
+       "tokens": 333,
+       "startLine": 100,
+       "endLine": 138,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/extending-suggestions.md",
+     "source": "project",
+     "title": "Extending the Suggestion Catalog",
+     "tokens": 3227,
+     "contentHash": "golden:docs/extending-suggestions.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "The suggestion catalog powers `/prepare-for-swarm`.",
+       "tokens": 200,
+       "startLine": 1,
+       "endLine": 15,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The `CatalogEntry` schema"
+       ],
+       "synopsis": "One entry is one suggestion.",
+       "tokens": 310,
+       "startLine": 16,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "The three axes"
+       ],
+       "synopsis": "`SuggestionAxis` is derived from the `SUGGESTION_AXES` const array — a closed set of exactly three string identifiers:",
+       "tokens": 174,
+       "startLine": 31,
+       "endLine": 46,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Detection signals"
+       ],
+       "synopsis": "A `DetectionSignal` decides whether an entry is relevant to the current repo.",
+       "tokens": 349,
+       "startLine": 47,
+       "endLine": 81,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Template files"
+       ],
+       "synopsis": "Each entry's template files live in `suggestions/templates/<entry-id>/`.",
+       "tokens": 296,
+       "startLine": 82,
+       "endLine": 105,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Worked example: adding a `biome-lint-enforcer` skill"
+       ],
+       "synopsis": "This walks through one real entry end to end.",
+       "tokens": 1119,
+       "startLine": 106,
+       "endLine": 217,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Rationale and design decisions"
+       ],
+       "synopsis": "The matcher can offer at most 4–5 entries per axis (see [The three axes](#the-three-axes), where the cap is stated alongside the axis definitions).",
+       "tokens": 780,
+       "startLine": 218,
+       "endLine": 271,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/helix-integration-design.md",
+     "source": "project",
+     "title": "Helix Integration — Swarm SDK Design Spec",
+     "tokens": 5940,
+     "contentHash": "golden:docs/specs/helix-integration-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Problem"
+       ],
+       "synopsis": "**Date:** 2026-04-01 **Author:** example-user + Claude Opus 4.6 **Branch:** `feat/helix-integration` (@mnmal-ai/swarm) **Status:** Draft — pending approval",
+       "tokens": 262,
+       "startLine": 1,
+       "endLine": 19,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Solution"
+       ],
+       "synopsis": "Replace the Swarm SDK's file-based storage and string-based data exchange with Helix — a typed data resolution framework with schema-as-codebook, positional…",
+       "tokens": 159,
+       "startLine": 20,
+       "endLine": 27,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Non-Goals"
+       ],
+       "synopsis": "Replacing the LLM prompt format.",
+       "tokens": 1106,
+       "startLine": 28,
+       "endLine": 130,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Phase 1: Swarm Content as Helix Types"
+       ],
+       "synopsis": "**SwarmContent** — One entity per swarm file (values.md, modes/code-review.md, etc.)",
+       "tokens": 1069,
+       "startLine": 131,
+       "endLine": 237,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Phase 2: Typed Oversight Transport"
+       ],
+       "synopsis": "**WorkerResult** — Created after each Worker execution",
+       "tokens": 816,
+       "startLine": 238,
+       "endLine": 328,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Phase 3: Telemetry as Helix Entities"
+       ],
+       "synopsis": "**SessionEvent** — Replaces SwarmEvent JSONL",
+       "tokens": 703,
+       "startLine": 329,
+       "endLine": 431,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Phase 4: Orchestrator Negotiation via Schema"
+       ],
+       "synopsis": "**Goal** — Replaces goals.json on disk",
+       "tokens": 722,
+       "startLine": 432,
+       "endLine": 510,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Human Readability Constraint"
+       ],
+       "synopsis": "All Helix data must be renderable as human-readable text via the CLI.",
+       "tokens": 278,
+       "startLine": 511,
+       "endLine": 529,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Propose Batch Strategy"
+       ],
+       "synopsis": "All swarm types must be proposed in the correct order, with cross-references within the same batch where possible.",
+       "tokens": 370,
+       "startLine": 530,
+       "endLine": 585,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Validation Test"
+       ],
+       "synopsis": "After all 4 phases are complete:",
+       "tokens": 165,
+       "startLine": 586,
+       "endLine": 601,
+       "loaded": false
+      },
+      {
+       "ordinal": 10,
+       "headingPath": [
+        "Known Limitations (PoC Scope)"
+       ],
+       "synopsis": "**Auto-CRUD filtering:** Only `id` and `limit` work server-side.",
+       "tokens": 290,
+       "startLine": 602,
+       "endLine": 611,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/orchestrator-intelligence-design.md",
+     "source": "project",
+     "title": "Swarm SDK — Orchestrator Intelligence Improvements",
+     "tokens": 3588,
+     "contentHash": "golden:docs/specs/orchestrator-intelligence-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Context"
+       ],
+       "synopsis": "**Date:** 2026-03-23 **Status:** Approved **Incident:** Swarm run on sample-project-a spent $46.15, produced 45% completion (blank page), left ~20 vitest…",
+       "tokens": 243,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Approach"
+       ],
+       "synopsis": "Three PRs grouped by subsystem:",
+       "tokens": 425,
+       "startLine": 17,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "PR 2: Orchestrator Core — Dispatch Intelligence"
+       ],
+       "synopsis": "Four interconnected changes to how the orchestrator dispatches and schedules work.",
+       "tokens": 1745,
+       "startLine": 54,
+       "endLine": 181,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "PR 3: Validation Layer — Completion Intelligence"
+       ],
+       "synopsis": "Two changes to how the orchestrator judges whether a goal is truly complete.",
+       "tokens": 867,
+       "startLine": 182,
+       "endLine": 269,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Summary of changes by file"
+       ],
+       "synopsis": "File | PR | Changes",
+       "tokens": 178,
+       "startLine": 270,
+       "endLine": 280,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Testing strategy"
+       ],
+       "synopsis": "**PR 1:** Unit test: scaffold a swarm with a route referencing a non-existent file, verify stub is created and warning printed.",
+       "tokens": 131,
+       "startLine": 281,
+       "endLine": 286,
+       "loaded": false
+      }
+     ]
+    }
+   ],
+   "budgetTokens": 2400,
+   "taskText": "Update helix-integration-design.md.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 2500
+  },
+  "output": {
+   "text": "## Documents\n\nThese documents are stored by section. Read only the sections you need: `L41–120` means Read with offset 41 and limit 80. A read that spans several sections and more than 2,500 tokens is refused, with the document's sections and their line ranges.\n\n### docs/specs/helix-integration-design.md (5,940 tok) — Helix Integration — Swarm SDK Design Spec\n- L1–19 Problem (262 tok) — **Date:** 2026-04-01 **Author:** example-user + Claude Opus 4.6 **Branch:** `feat/helix-integration` (@mnmal-ai/swarm) **Status:** Draft — pending approval\n- L20–27 Solution (159 tok) — Replace the Swarm SDK's file-based storage and string-based data exchange with Helix — a typed data resolution framework with schema-as-codebook, positional…\n- L28–130 Non-Goals (1,106 tok) — Replacing the LLM prompt format.\n- L131–237 Phase 1: Swarm Content as Helix Types (1,069 tok) — **SwarmContent** — One entity per swarm file (values.md, modes/code-review.md, etc.)\n- L238–328 Phase 2: Typed Oversight Transport (816 tok) — **WorkerResult** — Created after each Worker execution\n- L329–431 Phase 3: Telemetry as Helix Entities (703 tok) — **SessionEvent** — Replaces SwarmEvent JSONL\n- L432–510 Phase 4: Orchestrator Negotiation via Schema (722 tok) — **Goal** — Replaces goals.json on disk\n- L511–529 Human Readability Constraint (278 tok) — All Helix data must be renderable as human-readable text via the CLI.\n- L530–585 Propose Batch Strategy (370 tok) — All swarm types must be proposed in the correct order, with cross-references within the same batch where possible.\n- L586–601 Validation Test (165 tok) — After all 4 phases are complete:\n- L602–611 Known Limitations (PoC Scope) (290 tok) — **Auto-CRUD filtering:** Only `id` and `limit` work server-side.\n\n- /home/dev/project/.swarm/core/context-layers.md (822 tok, 4 sections) — Context Layers\n- /home/dev/project/.swarm/domains/example/oversight.md (939 tok, 4 sections) — Oversight\n- docs/extending-suggestions.md (3,227 tok, 7 sections) — Extending the Suggestion Catalog\n- docs/project-structure.md (2,630 tok, 4 sections) — Project Structure\n- docs/sdk-api.md (1,088 tok, 5 sections) — SDK API\n- docs/specs/context-sections-design.md (3,123 tok, 10 sections) — Swarm context: sections, index and pull\n- docs/specs/orchestrator-intelligence-design.md (3,588 tok, 6 sections) — Swarm SDK — Orchestrator Intelligence Improvements",
+   "tokens": 594,
+   "documents": 8,
+   "expanded": 1,
+   "folded": 7,
+   "dropped": 0
+  }
+ },
+ {
+  "name": "budget too small for every folded line",
+  "input": {
+   "documents": [
+    {
+     "path": "core/context-layers.md",
+     "source": "swarm",
+     "title": "Context Layers",
+     "tokens": 822,
+     "contentHash": "golden:core/context-layers.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The Seven Layers"
+       ],
+       "synopsis": "Swarm organizes knowledge in concentric layers, loaded from innermost (always) to outermost (budget permitting).",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": true
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Context Budget"
+       ],
+       "synopsis": "Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).",
+       "tokens": 141,
+       "startLine": 17,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "How Routing Works"
+       ],
+       "synopsis": "At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.",
+       "tokens": 281,
+       "startLine": 31,
+       "endLine": 50,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Skills Tiers"
+       ],
+       "synopsis": "Third-party knowledge is organized by trust level:",
+       "tokens": 118,
+       "startLine": 51,
+       "endLine": 60,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "domains/example/oversight.md",
+     "source": "swarm",
+     "title": "Oversight",
+     "tokens": 939,
+     "contentHash": "golden:domains/example/oversight.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Agent Roles"
+       ],
+       "synopsis": "Swarm uses a multi-agent oversight chain where separate agents validate each other's work.",
+       "tokens": 256,
+       "startLine": 1,
+       "endLine": 17,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The Chain"
+       ],
+       "synopsis": "The Chain",
+       "tokens": 137,
+       "startLine": 18,
+       "endLine": 38,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Review Policy"
+       ],
+       "synopsis": "Defined in `oversight/review-policy.json`.",
+       "tokens": 121,
+       "startLine": 39,
+       "endLine": 57,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Disagreement Handling"
+       ],
+       "synopsis": "Severity | Examples | Action",
+       "tokens": 426,
+       "startLine": 58,
+       "endLine": 89,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/context-sections-design.md",
+     "source": "project",
+     "title": "Swarm context: sections, index and pull",
+     "tokens": 3123,
+     "contentHash": "golden:docs/specs/context-sections-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "**Date:** 2026-10-01 · **Status:** approved; stage 2 implemented",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 14,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Background"
+       ],
+       "synopsis": "In the measured baseline run (854 model calls, about 44k tokens of context per call, 97% of input as cache reads), context came from three places:",
+       "tokens": 243,
+       "startLine": 15,
+       "endLine": 24,
+       "loaded": true
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Part 1: documents as sections"
+       ],
+       "synopsis": "Swarm defines two types, `Document` and `Section`, in a namespace of their own (`swarm-docs`, unique across a Helix instance), in the coordinator plugin swarm…",
+       "tokens": 730,
+       "startLine": 25,
+       "endLine": 45,
+       "loaded": true
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Part 2: push an index, pull the rest"
+       ],
+       "synopsis": "A session starts with three blocks: the required core, the loaded sections under their document and heading paths, and an index of the stored documents in a…",
+       "tokens": 525,
+       "startLine": 46,
+       "endLine": 55,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Part 3: ranking by relevance"
+       ],
+       "synopsis": "Sections are ranked against the task by a local bge-m3 model at 1024 dimensions through Ollama on the same machine, so no document text leaves it.",
+       "tokens": 266,
+       "startLine": 56,
+       "endLine": 64,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Keeping agents on the pull path"
+       ],
+       "synopsis": "The index header says to read only the sections needed, and what is refused.",
+       "tokens": 289,
+       "startLine": 65,
+       "endLine": 68,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Isolation, failures and settings"
+       ],
+       "synopsis": "Everything stays on the project's own Helix and the local machine.",
+       "tokens": 250,
+       "startLine": 69,
+       "endLine": 89,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Rollout"
+       ],
+       "synopsis": "Each stage is its own PR, ships switched off, and must beat the baseline on the same kind of run before the next starts.",
+       "tokens": 214,
+       "startLine": 90,
+       "endLine": 101,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Decisions"
+       ],
+       "synopsis": "# | Decision | Outcome",
+       "tokens": 213,
+       "startLine": 102,
+       "endLine": 115,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Known issues left for later"
+       ],
+       "synopsis": "Budget and route rows are only inserted when missing, so editing `swarm.json` never updates them.",
+       "tokens": 113,
+       "startLine": 116,
+       "endLine": 122,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/project-structure.md",
+     "source": "project",
+     "title": "Project Structure",
+     "tokens": 2630,
+     "contentHash": "golden:docs/project-structure.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The `.swarm/` Directory"
+       ],
+       "synopsis": "`swarm init` creates a `.swarm/` directory in your project with structured context files.",
+       "tokens": 656,
+       "startLine": 1,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Helix Seeding"
+       ],
+       "synopsis": "The `.swarm/` directory is the authoring format.",
+       "tokens": 173,
+       "startLine": 54,
+       "endLine": 66,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Key Files"
+       ],
+       "synopsis": "The router manifest.",
+       "tokens": 1689,
+       "startLine": 67,
+       "endLine": 194,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Generated Skill Files"
+       ],
+       "synopsis": "`swarm init` also creates a skill file for your AI tool (outside `.swarm/`):",
+       "tokens": 112,
+       "startLine": 195,
+       "endLine": 207,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/sdk-api.md",
+     "source": "project",
+     "title": "SDK API",
+     "tokens": 1088,
+     "contentHash": "golden:docs/sdk-api.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Basic Usage"
+       ],
+       "synopsis": "The Swarm SDK can be used programmatically in TypeScript applications.",
+       "tokens": 278,
+       "startLine": 1,
+       "endLine": 33,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "HelixClient"
+       ],
+       "synopsis": "The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).",
+       "tokens": 204,
+       "startLine": 34,
+       "endLine": 58,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "With Oversight"
+       ],
+       "synopsis": "With Oversight",
+       "tokens": 130,
+       "startLine": 59,
+       "endLine": 73,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Benchmarking"
+       ],
+       "synopsis": "Run behavioral tests across models to compare quality:",
+       "tokens": 144,
+       "startLine": 74,
+       "endLine": 99,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Multi-Task Workflows"
+       ],
+       "synopsis": "The orchestrator manages goals that contain multiple tasks with dependencies.",
+       "tokens": 333,
+       "startLine": 100,
+       "endLine": 138,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/extending-suggestions.md",
+     "source": "project",
+     "title": "Extending the Suggestion Catalog",
+     "tokens": 3227,
+     "contentHash": "golden:docs/extending-suggestions.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "The suggestion catalog powers `/prepare-for-swarm`.",
+       "tokens": 200,
+       "startLine": 1,
+       "endLine": 15,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The `CatalogEntry` schema"
+       ],
+       "synopsis": "One entry is one suggestion.",
+       "tokens": 310,
+       "startLine": 16,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "The three axes"
+       ],
+       "synopsis": "`SuggestionAxis` is derived from the `SUGGESTION_AXES` const array — a closed set of exactly three string identifiers:",
+       "tokens": 174,
+       "startLine": 31,
+       "endLine": 46,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Detection signals"
+       ],
+       "synopsis": "A `DetectionSignal` decides whether an entry is relevant to the current repo.",
+       "tokens": 349,
+       "startLine": 47,
+       "endLine": 81,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Template files"
+       ],
+       "synopsis": "Each entry's template files live in `suggestions/templates/<entry-id>/`.",
+       "tokens": 296,
+       "startLine": 82,
+       "endLine": 105,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Worked example: adding a `biome-lint-enforcer` skill"
+       ],
+       "synopsis": "This walks through one real entry end to end.",
+       "tokens": 1119,
+       "startLine": 106,
+       "endLine": 217,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Rationale and design decisions"
+       ],
+       "synopsis": "The matcher can offer at most 4–5 entries per axis (see [The three axes](#the-three-axes), where the cap is stated alongside the axis definitions).",
+       "tokens": 780,
+       "startLine": 218,
+       "endLine": 271,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/helix-integration-design.md",
+     "source": "project",
+     "title": "Helix Integration — Swarm SDK Design Spec",
+     "tokens": 5940,
+     "contentHash": "golden:docs/specs/helix-integration-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Problem"
+       ],
+       "synopsis": "**Date:** 2026-04-01 **Author:** example-user + Claude Opus 4.6 **Branch:** `feat/helix-integration` (@mnmal-ai/swarm) **Status:** Draft — pending approval",
+       "tokens": 262,
+       "startLine": 1,
+       "endLine": 19,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Solution"
+       ],
+       "synopsis": "Replace the Swarm SDK's file-based storage and string-based data exchange with Helix — a typed data resolution framework with schema-as-codebook, positional…",
+       "tokens": 159,
+       "startLine": 20,
+       "endLine": 27,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Non-Goals"
+       ],
+       "synopsis": "Replacing the LLM prompt format.",
+       "tokens": 1106,
+       "startLine": 28,
+       "endLine": 130,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Phase 1: Swarm Content as Helix Types"
+       ],
+       "synopsis": "**SwarmContent** — One entity per swarm file (values.md, modes/code-review.md, etc.)",
+       "tokens": 1069,
+       "startLine": 131,
+       "endLine": 237,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Phase 2: Typed Oversight Transport"
+       ],
+       "synopsis": "**WorkerResult** — Created after each Worker execution",
+       "tokens": 816,
+       "startLine": 238,
+       "endLine": 328,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Phase 3: Telemetry as Helix Entities"
+       ],
+       "synopsis": "**SessionEvent** — Replaces SwarmEvent JSONL",
+       "tokens": 703,
+       "startLine": 329,
+       "endLine": 431,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Phase 4: Orchestrator Negotiation via Schema"
+       ],
+       "synopsis": "**Goal** — Replaces goals.json on disk",
+       "tokens": 722,
+       "startLine": 432,
+       "endLine": 510,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Human Readability Constraint"
+       ],
+       "synopsis": "All Helix data must be renderable as human-readable text via the CLI.",
+       "tokens": 278,
+       "startLine": 511,
+       "endLine": 529,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Propose Batch Strategy"
+       ],
+       "synopsis": "All swarm types must be proposed in the correct order, with cross-references within the same batch where possible.",
+       "tokens": 370,
+       "startLine": 530,
+       "endLine": 585,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Validation Test"
+       ],
+       "synopsis": "After all 4 phases are complete:",
+       "tokens": 165,
+       "startLine": 586,
+       "endLine": 601,
+       "loaded": false
+      },
+      {
+       "ordinal": 10,
+       "headingPath": [
+        "Known Limitations (PoC Scope)"
+       ],
+       "synopsis": "**Auto-CRUD filtering:** Only `id` and `limit` work server-side.",
+       "tokens": 290,
+       "startLine": 602,
+       "endLine": 611,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/orchestrator-intelligence-design.md",
+     "source": "project",
+     "title": "Swarm SDK — Orchestrator Intelligence Improvements",
+     "tokens": 3588,
+     "contentHash": "golden:docs/specs/orchestrator-intelligence-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Context"
+       ],
+       "synopsis": "**Date:** 2026-03-23 **Status:** Approved **Incident:** Swarm run on sample-project-a spent $46.15, produced 45% completion (blank page), left ~20 vitest…",
+       "tokens": 243,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Approach"
+       ],
+       "synopsis": "Three PRs grouped by subsystem:",
+       "tokens": 425,
+       "startLine": 17,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "PR 2: Orchestrator Core — Dispatch Intelligence"
+       ],
+       "synopsis": "Four interconnected changes to how the orchestrator dispatches and schedules work.",
+       "tokens": 1745,
+       "startLine": 54,
+       "endLine": 181,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "PR 3: Validation Layer — Completion Intelligence"
+       ],
+       "synopsis": "Two changes to how the orchestrator judges whether a goal is truly complete.",
+       "tokens": 867,
+       "startLine": 182,
+       "endLine": 269,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Summary of changes by file"
+       ],
+       "synopsis": "File | PR | Changes",
+       "tokens": 178,
+       "startLine": 270,
+       "endLine": 280,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Testing strategy"
+       ],
+       "synopsis": "**PR 1:** Unit test: scaffold a swarm with a route referencing a non-existent file, verify stub is created and warning printed.",
+       "tokens": 131,
+       "startLine": 281,
+       "endLine": 286,
+       "loaded": false
+      }
+     ]
+    }
+   ],
+   "budgetTokens": 800,
+   "taskText": "Fix the build.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 4000
+  },
+  "output": {
+   "text": "## Documents\n\nThese documents are stored by section. Read only the sections you need: `L41–120` means Read with offset 41 and limit 80. A read that spans several sections and more than 4,000 tokens is refused, with the document's sections and their line ranges.\n\n- /home/dev/project/.swarm/core/context-layers.md (822 tok, 4 sections) — Context Layers\n- /home/dev/project/.swarm/domains/example/oversight.md (939 tok, 4 sections) — Oversight\n- docs/extending-suggestions.md (3,227 tok, 7 sections) — Extending the Suggestion Catalog\n- docs/project-structure.md (2,630 tok, 4 sections) — Project Structure\n- docs/sdk-api.md (1,088 tok, 5 sections) — SDK API\n- docs/specs/context-sections-design.md (3,123 tok, 10 sections) — Swarm context: sections, index and pull\n- … 2 more documents (9,528 tok)",
+   "tokens": 199,
+   "documents": 8,
+   "expanded": 0,
+   "folded": 6,
+   "dropped": 2
+  }
+ },
+ {
+  "name": "swarm files only",
+  "input": {
+   "documents": [
+    {
+     "path": "core/context-layers.md",
+     "source": "swarm",
+     "title": "Context Layers",
+     "tokens": 822,
+     "contentHash": "golden:core/context-layers.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The Seven Layers"
+       ],
+       "synopsis": "Swarm organizes knowledge in concentric layers, loaded from innermost (always) to outermost (budget permitting).",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": true
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Context Budget"
+       ],
+       "synopsis": "Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).",
+       "tokens": 141,
+       "startLine": 17,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "How Routing Works"
+       ],
+       "synopsis": "At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.",
+       "tokens": 281,
+       "startLine": 31,
+       "endLine": 50,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Skills Tiers"
+       ],
+       "synopsis": "Third-party knowledge is organized by trust level:",
+       "tokens": 118,
+       "startLine": 51,
+       "endLine": 60,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "domains/example/oversight.md",
+     "source": "swarm",
+     "title": "Oversight",
+     "tokens": 939,
+     "contentHash": "golden:domains/example/oversight.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Agent Roles"
+       ],
+       "synopsis": "Swarm uses a multi-agent oversight chain where separate agents validate each other's work.",
+       "tokens": 256,
+       "startLine": 1,
+       "endLine": 17,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The Chain"
+       ],
+       "synopsis": "The Chain",
+       "tokens": 137,
+       "startLine": 18,
+       "endLine": 38,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Review Policy"
+       ],
+       "synopsis": "Defined in `oversight/review-policy.json`.",
+       "tokens": 121,
+       "startLine": 39,
+       "endLine": 57,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Disagreement Handling"
+       ],
+       "synopsis": "Severity | Examples | Action",
+       "tokens": 426,
+       "startLine": 58,
+       "endLine": 89,
+       "loaded": false
+      }
+     ]
+    }
+   ],
+   "budgetTokens": 40000,
+   "taskText": "Review the change.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 4000
+  },
+  "output": {
+   "text": "## Documents\n\nThese documents are stored by section. Read only the sections you need: `L41–120` means Read with offset 41 and limit 80. A read that spans several sections and more than 4,000 tokens is refused, with the document's sections and their line ranges.\n\n### /home/dev/project/.swarm/core/context-layers.md (822 tok) — Context Layers\n- L17–30 Context Budget (141 tok) — Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).\n- L31–50 How Routing Works (281 tok) — At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.\n- L51–60 Skills Tiers (118 tok) — Third-party knowledge is organized by trust level:\n\n### /home/dev/project/.swarm/domains/example/oversight.md (939 tok) — Oversight\n- L1–17 Agent Roles (256 tok) — Swarm uses a multi-agent oversight chain where separate agents validate each other's work.\n- L18–38 The Chain (137 tok) — The Chain\n- L39–57 Review Policy (121 tok) — Defined in `oversight/review-policy.json`.\n- L58–89 Disagreement Handling (426 tok) — Severity | Examples | Action",
+   "tokens": 269,
+   "documents": 2,
+   "expanded": 2,
+   "folded": 0,
+   "dropped": 0
+  }
+ },
+ {
+  "name": "a name that is part of a longer name does not count",
+  "input": {
+   "documents": [
+    {
+     "path": "core/context-layers.md",
+     "source": "swarm",
+     "title": "Context Layers",
+     "tokens": 822,
+     "contentHash": "golden:core/context-layers.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The Seven Layers"
+       ],
+       "synopsis": "Swarm organizes knowledge in concentric layers, loaded from innermost (always) to outermost (budget permitting).",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": true
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Context Budget"
+       ],
+       "synopsis": "Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).",
+       "tokens": 141,
+       "startLine": 17,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "How Routing Works"
+       ],
+       "synopsis": "At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.",
+       "tokens": 281,
+       "startLine": 31,
+       "endLine": 50,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Skills Tiers"
+       ],
+       "synopsis": "Third-party knowledge is organized by trust level:",
+       "tokens": 118,
+       "startLine": 51,
+       "endLine": 60,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "domains/example/oversight.md",
+     "source": "swarm",
+     "title": "Oversight",
+     "tokens": 939,
+     "contentHash": "golden:domains/example/oversight.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Agent Roles"
+       ],
+       "synopsis": "Swarm uses a multi-agent oversight chain where separate agents validate each other's work.",
+       "tokens": 256,
+       "startLine": 1,
+       "endLine": 17,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The Chain"
+       ],
+       "synopsis": "The Chain",
+       "tokens": 137,
+       "startLine": 18,
+       "endLine": 38,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Review Policy"
+       ],
+       "synopsis": "Defined in `oversight/review-policy.json`.",
+       "tokens": 121,
+       "startLine": 39,
+       "endLine": 57,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Disagreement Handling"
+       ],
+       "synopsis": "Severity | Examples | Action",
+       "tokens": 426,
+       "startLine": 58,
+       "endLine": 89,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/context-sections-design.md",
+     "source": "project",
+     "title": "Swarm context: sections, index and pull",
+     "tokens": 3123,
+     "contentHash": "golden:docs/specs/context-sections-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "**Date:** 2026-10-01 · **Status:** approved; stage 2 implemented",
+       "tokens": 282,
+       "startLine": 1,
+       "endLine": 14,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Background"
+       ],
+       "synopsis": "In the measured baseline run (854 model calls, about 44k tokens of context per call, 97% of input as cache reads), context came from three places:",
+       "tokens": 243,
+       "startLine": 15,
+       "endLine": 24,
+       "loaded": true
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Part 1: documents as sections"
+       ],
+       "synopsis": "Swarm defines two types, `Document` and `Section`, in a namespace of their own (`swarm-docs`, unique across a Helix instance), in the coordinator plugin swarm…",
+       "tokens": 730,
+       "startLine": 25,
+       "endLine": 45,
+       "loaded": true
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Part 2: push an index, pull the rest"
+       ],
+       "synopsis": "A session starts with three blocks: the required core, the loaded sections under their document and heading paths, and an index of the stored documents in a…",
+       "tokens": 525,
+       "startLine": 46,
+       "endLine": 55,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Part 3: ranking by relevance"
+       ],
+       "synopsis": "Sections are ranked against the task by a local bge-m3 model at 1024 dimensions through Ollama on the same machine, so no document text leaves it.",
+       "tokens": 266,
+       "startLine": 56,
+       "endLine": 64,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Keeping agents on the pull path"
+       ],
+       "synopsis": "The index header says to read only the sections needed, and what is refused.",
+       "tokens": 289,
+       "startLine": 65,
+       "endLine": 68,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Isolation, failures and settings"
+       ],
+       "synopsis": "Everything stays on the project's own Helix and the local machine.",
+       "tokens": 250,
+       "startLine": 69,
+       "endLine": 89,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Rollout"
+       ],
+       "synopsis": "Each stage is its own PR, ships switched off, and must beat the baseline on the same kind of run before the next starts.",
+       "tokens": 214,
+       "startLine": 90,
+       "endLine": 101,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Decisions"
+       ],
+       "synopsis": "# | Decision | Outcome",
+       "tokens": 213,
+       "startLine": 102,
+       "endLine": 115,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Known issues left for later"
+       ],
+       "synopsis": "Budget and route rows are only inserted when missing, so editing `swarm.json` never updates them.",
+       "tokens": 113,
+       "startLine": 116,
+       "endLine": 122,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/project-structure.md",
+     "source": "project",
+     "title": "Project Structure",
+     "tokens": 2630,
+     "contentHash": "golden:docs/project-structure.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "The `.swarm/` Directory"
+       ],
+       "synopsis": "`swarm init` creates a `.swarm/` directory in your project with structured context files.",
+       "tokens": 656,
+       "startLine": 1,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Helix Seeding"
+       ],
+       "synopsis": "The `.swarm/` directory is the authoring format.",
+       "tokens": 173,
+       "startLine": 54,
+       "endLine": 66,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Key Files"
+       ],
+       "synopsis": "The router manifest.",
+       "tokens": 1689,
+       "startLine": 67,
+       "endLine": 194,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Generated Skill Files"
+       ],
+       "synopsis": "`swarm init` also creates a skill file for your AI tool (outside `.swarm/`):",
+       "tokens": 112,
+       "startLine": 195,
+       "endLine": 207,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/sdk-api.md",
+     "source": "project",
+     "title": "SDK API",
+     "tokens": 1088,
+     "contentHash": "golden:docs/sdk-api.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Basic Usage"
+       ],
+       "synopsis": "The Swarm SDK can be used programmatically in TypeScript applications.",
+       "tokens": 278,
+       "startLine": 1,
+       "endLine": 33,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "HelixClient"
+       ],
+       "synopsis": "The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).",
+       "tokens": 204,
+       "startLine": 34,
+       "endLine": 58,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "With Oversight"
+       ],
+       "synopsis": "With Oversight",
+       "tokens": 130,
+       "startLine": 59,
+       "endLine": 73,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Benchmarking"
+       ],
+       "synopsis": "Run behavioral tests across models to compare quality:",
+       "tokens": 144,
+       "startLine": 74,
+       "endLine": 99,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Multi-Task Workflows"
+       ],
+       "synopsis": "The orchestrator manages goals that contain multiple tasks with dependencies.",
+       "tokens": 333,
+       "startLine": 100,
+       "endLine": 138,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/extending-suggestions.md",
+     "source": "project",
+     "title": "Extending the Suggestion Catalog",
+     "tokens": 3227,
+     "contentHash": "golden:docs/extending-suggestions.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [],
+       "synopsis": "The suggestion catalog powers `/prepare-for-swarm`.",
+       "tokens": 200,
+       "startLine": 1,
+       "endLine": 15,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "The `CatalogEntry` schema"
+       ],
+       "synopsis": "One entry is one suggestion.",
+       "tokens": 310,
+       "startLine": 16,
+       "endLine": 30,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "The three axes"
+       ],
+       "synopsis": "`SuggestionAxis` is derived from the `SUGGESTION_AXES` const array — a closed set of exactly three string identifiers:",
+       "tokens": 174,
+       "startLine": 31,
+       "endLine": 46,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Detection signals"
+       ],
+       "synopsis": "A `DetectionSignal` decides whether an entry is relevant to the current repo.",
+       "tokens": 349,
+       "startLine": 47,
+       "endLine": 81,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Template files"
+       ],
+       "synopsis": "Each entry's template files live in `suggestions/templates/<entry-id>/`.",
+       "tokens": 296,
+       "startLine": 82,
+       "endLine": 105,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Worked example: adding a `biome-lint-enforcer` skill"
+       ],
+       "synopsis": "This walks through one real entry end to end.",
+       "tokens": 1119,
+       "startLine": 106,
+       "endLine": 217,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Rationale and design decisions"
+       ],
+       "synopsis": "The matcher can offer at most 4–5 entries per axis (see [The three axes](#the-three-axes), where the cap is stated alongside the axis definitions).",
+       "tokens": 780,
+       "startLine": 218,
+       "endLine": 271,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/helix-integration-design.md",
+     "source": "project",
+     "title": "Helix Integration — Swarm SDK Design Spec",
+     "tokens": 5940,
+     "contentHash": "golden:docs/specs/helix-integration-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Problem"
+       ],
+       "synopsis": "**Date:** 2026-04-01 **Author:** example-user + Claude Opus 4.6 **Branch:** `feat/helix-integration` (@mnmal-ai/swarm) **Status:** Draft — pending approval",
+       "tokens": 262,
+       "startLine": 1,
+       "endLine": 19,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Solution"
+       ],
+       "synopsis": "Replace the Swarm SDK's file-based storage and string-based data exchange with Helix — a typed data resolution framework with schema-as-codebook, positional…",
+       "tokens": 159,
+       "startLine": 20,
+       "endLine": 27,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "Non-Goals"
+       ],
+       "synopsis": "Replacing the LLM prompt format.",
+       "tokens": 1106,
+       "startLine": 28,
+       "endLine": 130,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "Phase 1: Swarm Content as Helix Types"
+       ],
+       "synopsis": "**SwarmContent** — One entity per swarm file (values.md, modes/code-review.md, etc.)",
+       "tokens": 1069,
+       "startLine": 131,
+       "endLine": 237,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Phase 2: Typed Oversight Transport"
+       ],
+       "synopsis": "**WorkerResult** — Created after each Worker execution",
+       "tokens": 816,
+       "startLine": 238,
+       "endLine": 328,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Phase 3: Telemetry as Helix Entities"
+       ],
+       "synopsis": "**SessionEvent** — Replaces SwarmEvent JSONL",
+       "tokens": 703,
+       "startLine": 329,
+       "endLine": 431,
+       "loaded": false
+      },
+      {
+       "ordinal": 6,
+       "headingPath": [
+        "Phase 4: Orchestrator Negotiation via Schema"
+       ],
+       "synopsis": "**Goal** — Replaces goals.json on disk",
+       "tokens": 722,
+       "startLine": 432,
+       "endLine": 510,
+       "loaded": false
+      },
+      {
+       "ordinal": 7,
+       "headingPath": [
+        "Human Readability Constraint"
+       ],
+       "synopsis": "All Helix data must be renderable as human-readable text via the CLI.",
+       "tokens": 278,
+       "startLine": 511,
+       "endLine": 529,
+       "loaded": false
+      },
+      {
+       "ordinal": 8,
+       "headingPath": [
+        "Propose Batch Strategy"
+       ],
+       "synopsis": "All swarm types must be proposed in the correct order, with cross-references within the same batch where possible.",
+       "tokens": 370,
+       "startLine": 530,
+       "endLine": 585,
+       "loaded": false
+      },
+      {
+       "ordinal": 9,
+       "headingPath": [
+        "Validation Test"
+       ],
+       "synopsis": "After all 4 phases are complete:",
+       "tokens": 165,
+       "startLine": 586,
+       "endLine": 601,
+       "loaded": false
+      },
+      {
+       "ordinal": 10,
+       "headingPath": [
+        "Known Limitations (PoC Scope)"
+       ],
+       "synopsis": "**Auto-CRUD filtering:** Only `id` and `limit` work server-side.",
+       "tokens": 290,
+       "startLine": 602,
+       "endLine": 611,
+       "loaded": false
+      }
+     ]
+    },
+    {
+     "path": "docs/specs/orchestrator-intelligence-design.md",
+     "source": "project",
+     "title": "Swarm SDK — Orchestrator Intelligence Improvements",
+     "tokens": 3588,
+     "contentHash": "golden:docs/specs/orchestrator-intelligence-design.md",
+     "sections": [
+      {
+       "ordinal": 0,
+       "headingPath": [
+        "Context"
+       ],
+       "synopsis": "**Date:** 2026-03-23 **Status:** Approved **Incident:** Swarm run on sample-project-a spent $46.15, produced 45% completion (blank page), left ~20 vitest…",
+       "tokens": 243,
+       "startLine": 1,
+       "endLine": 16,
+       "loaded": false
+      },
+      {
+       "ordinal": 1,
+       "headingPath": [
+        "Approach"
+       ],
+       "synopsis": "Three PRs grouped by subsystem:",
+       "tokens": 425,
+       "startLine": 17,
+       "endLine": 53,
+       "loaded": false
+      },
+      {
+       "ordinal": 2,
+       "headingPath": [
+        "PR 2: Orchestrator Core — Dispatch Intelligence"
+       ],
+       "synopsis": "Four interconnected changes to how the orchestrator dispatches and schedules work.",
+       "tokens": 1745,
+       "startLine": 54,
+       "endLine": 181,
+       "loaded": false
+      },
+      {
+       "ordinal": 3,
+       "headingPath": [
+        "PR 3: Validation Layer — Completion Intelligence"
+       ],
+       "synopsis": "Two changes to how the orchestrator judges whether a goal is truly complete.",
+       "tokens": 867,
+       "startLine": 182,
+       "endLine": 269,
+       "loaded": false
+      },
+      {
+       "ordinal": 4,
+       "headingPath": [
+        "Summary of changes by file"
+       ],
+       "synopsis": "File | PR | Changes",
+       "tokens": 178,
+       "startLine": 270,
+       "endLine": 280,
+       "loaded": false
+      },
+      {
+       "ordinal": 5,
+       "headingPath": [
+        "Testing strategy"
+       ],
+       "synopsis": "**PR 1:** Unit test: scaffold a swarm with a route referencing a non-existent file, verify stub is created and warning printed.",
+       "tokens": 131,
+       "startLine": 281,
+       "endLine": 286,
+       "loaded": false
+      }
+     ]
+    }
+   ],
+   "budgetTokens": 30000,
+   "taskText": "See openapi-project-structure.md and sdk-api.md.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 100000
+  },
+  "output": {
+   "text": "## Documents\n\nThese documents are stored by section. Read only the sections you need: `L41–120` means Read with offset 41 and limit 80. A read that spans several sections and more than 100,000 tokens is refused, with the document's sections and their line ranges.\n\n### docs/sdk-api.md (1,088 tok) — SDK API\n- L1–33 Basic Usage (278 tok) — The Swarm SDK can be used programmatically in TypeScript applications.\n- L34–58 HelixClient (204 tok) — The `HelixClient` handles all communication with the Helix sidecar (Fastify + Postgres).\n- L59–73 With Oversight (130 tok) — With Oversight\n- L74–99 Benchmarking (144 tok) — Run behavioral tests across models to compare quality:\n- L100–138 Multi-Task Workflows (333 tok) — The orchestrator manages goals that contain multiple tasks with dependencies.\n\n### /home/dev/project/.swarm/core/context-layers.md (822 tok) — Context Layers\n- L17–30 Context Budget (141 tok) — Models degrade as context fills up (the \"lost-in-the-middle\" phenomenon).\n- L31–50 How Routing Works (281 tok) — At runtime, the SDK queries `SwarmRoute` entities from Helix instead of reading `swarm.json` from disk.\n- L51–60 Skills Tiers (118 tok) — Third-party knowledge is organized by trust level:\n\n### /home/dev/project/.swarm/domains/example/oversight.md (939 tok) — Oversight\n- L1–17 Agent Roles (256 tok) — Swarm uses a multi-agent oversight chain where separate agents validate each other's work.\n- L18–38 The Chain (137 tok) — The Chain\n- L39–57 Review Policy (121 tok) — Defined in `oversight/review-policy.json`.\n- L58–89 Disagreement Handling (426 tok) — Severity | Examples | Action\n\n- docs/extending-suggestions.md (3,227 tok, 7 sections) — Extending the Suggestion Catalog\n- docs/project-structure.md (2,630 tok, 4 sections) — Project Structure\n- docs/specs/context-sections-design.md (3,123 tok, 10 sections) — Swarm context: sections, index and pull\n- docs/specs/helix-integration-design.md (5,940 tok, 11 sections) — Helix Integration — Swarm SDK Design Spec\n- docs/specs/orchestrator-intelligence-design.md (3,588 tok, 6 sections) — Swarm SDK — Orchestrator Intelligence Improvements",
+   "tokens": 529,
+   "documents": 8,
+   "expanded": 3,
+   "folded": 5,
+   "dropped": 0
+  }
+ },
+ {
+  "name": "no documents",
+  "input": {
+   "documents": [],
+   "budgetTokens": 30000,
+   "taskText": "Anything.",
+   "roots": {
+    "swarm": "/home/dev/project/.swarm",
+    "project": "/home/dev/project"
+   },
+   "maxReadTokens": 4000
+  },
+  "output": {
+   "text": "",
+   "tokens": 0,
+   "documents": 0,
+   "expanded": 0,
+   "folded": 0,
+   "dropped": 0
+  }
+ }
+]

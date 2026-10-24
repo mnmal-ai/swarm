@@ -1,0 +1,21 @@
+name: swarm-meta
+
+# Meta-store Postgres (loopback only). Ports: Postgres 32340, meta sidecar 32341.
+services:
+  swarm-meta:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm_meta
+    ports:
+      - "127.0.0.1:32340:5432"
+    volumes:
+      - swarm_meta_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm -d swarm_meta"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  swarm_meta_data:

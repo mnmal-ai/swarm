@@ -1,0 +1,11 @@
+{
+  "$comment": "MCP config stub copied in when the filesystem suggestion is accepted. Merge the entry under mcpServers into each backend's config. The trailing '.' scopes access to the project root; widen the args only deliberately.",
+  "mcpServers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,71 @@
+# Build output
+dist/
+
+# Compiled binary (from scripts/compile.sh)
+/swarm
+/swarm-*
+
+# Per-package build output (monorepo)
+packages/*/dist/
+
+# Turborepo cache
+.turbo/
+
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test
+coverage/
+
+# Downloaded telemetry (contains user PII and run data)
+.swarm/telemetry/downloads/
+.swarm/telemetry/pending/
+.swarm/telemetry/events/
+.swarm/telemetry/reports/
+
+# Worktrees (created by swarm run)
+.swarm/worktrees/
+.claude/worktrees/
+
+# Personal Claude Code permission grants — never share across machines.
+.claude/settings.local.json
+
+# Per-process scheduled-task lock. Records the live PID + session ID + acquire
+# timestamp of whatever process holds the scheduled-task lease right now.
+# Committing it would block every CI/fresh-checkout scheduled-task run with a
+# stale lock referencing a PID that doesn't exist on the new machine.
+.claude/scheduled_tasks.lock
+
+# Skill cache — regenerated on demand, not part of repo state.
+.cache/
+
+# Playwright MCP session artifacts (timestamped console logs + page YAML
+# that may contain live cost/task data from the dashboard).
+.playwright-mcp/
+
+# Build artifacts from npm pack
+*.tgz
+
+# Lock files are committed for reproducible CI builds
+
+# Local agent scratch
+.superpowers/
+
+# Packed substrate plugin (scripts/pack-substrate-plugin.sh)
+packages/cli/assets/*.tgz
+test-results.json

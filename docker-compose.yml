@@ -1,0 +1,23 @@
+name: swarm-substrate
+
+# Cold-store Postgres for the Substrate sidecar (loopback only). The sidecar
+# itself is started by `swarm substrate start`; this file only provides the
+# database. Ports: Postgres 32337, sidecar 32338.
+services:
+  swarm-substrate:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm
+    ports:
+      - "127.0.0.1:32337:5432"
+    volumes:
+      - swarm_substrate_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm -d swarm"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  swarm_substrate_data:

@@ -1,0 +1,13 @@
+{
+  "$comment": "MCP config stub copied in when the sentry suggestion is accepted. Merge the entry under mcpServers into each backend's config. SENTRY_AUTH_TOKEN reads from env — never commit an auth token into this file.",
+  "mcpServers": {
+    "sentry": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server"],
+      "env": {
+        "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}"
+      }
+    }
+  }
+}

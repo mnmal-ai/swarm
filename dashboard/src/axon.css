@@ -1,0 +1,114 @@
+/*
+ * Axon design tokens, loaded the way swarm's live dashboard loads them:
+ * the dark tokens (with the embedded DM Sans / DM Mono faces) by default,
+ * and the light overrides when the viewer prefers a light scheme.
+ */
+@import "./axon/tokens.css";
+@import "./axon/theme-light.css" (prefers-color-scheme: light);
+
+:root { color-scheme: light dark; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Surfaces: one material; panels and cards rise from it ── */
+.axon-panel { background: var(--bg); box-shadow: var(--neu-shadow-panel); }
+.axon-card { background: var(--bg); box-shadow: var(--neu-shadow-card); }
+
+/*
+ * Rise: below the surface a card is compressed and casts no shadow; it
+ * overshoots as it breaks through, shadow peaking, then settles into its
+ * own resting shadow (the implicit final keyframe).
+ */
+@keyframes axon-rise {
+  0% {
+    opacity: 0;
+    transform: scale(var(--scale-below)) translateY(var(--translate-rise));
+    box-shadow: none;
+  }
+  58% {
+    opacity: 1;
+    transform: scale(var(--scale-overshoot)) translateY(var(--translate-overshoot));
+    box-shadow: var(--neu-shadow-hover);
+  }
+}
+.axon-rise {
+  animation: axon-rise var(--duration-slow) var(--easing-spring) backwards;
+  animation-delay: calc(var(--stagger-card) * var(--rise-index, 0));
+}
+
+/*
+ * Press: a pressed card sinks back toward the surface. Its scale mirrors the
+ * entry overshoot below 1 and its outer shadow contracts; release springs back.
+ */
+.axon-press {
+  cursor: pointer;
+  transition:
+    box-shadow var(--duration-fast) var(--easing-standard),
+    transform var(--duration-fast) var(--easing-spring);
+}
+.axon-press:hover { box-shadow: var(--neu-shadow-hover); }
+.axon-press:active {
+  transform: scale(calc(2 - var(--scale-overshoot)));
+  box-shadow: var(--neu-shadow-subtask);
+  transition-timing-function: var(--easing-sink);
+}
+.axon-press:focus-visible,
+.axon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Buttons: primary (filled), secondary (raised, accent stripe), text ── */
+.axon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: none;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    box-shadow var(--duration-fast) var(--easing-standard),
+    transform var(--duration-fast) var(--easing-spring),
+    text-decoration-color var(--duration-fast) var(--easing-standard);
+}
+.axon-btn-primary { background: var(--accent); color: var(--bg); box-shadow: var(--neu-shadow-panel); }
+.axon-btn-secondary {
+  background: var(--bg);
+  color: var(--accent);
+  box-shadow: var(--neu-shadow-btn);
+  border-left: 3px solid var(--accent);
+}
+.axon-btn-primary:hover,
+.axon-btn-secondary:hover { box-shadow: var(--neu-shadow-hover); }
+.axon-btn-primary:active,
+.axon-btn-secondary:active {
+  transform: scale(calc(2 - var(--scale-overshoot)));
+  box-shadow: var(--neu-shadow-subtask);
+  transition-timing-function: var(--easing-sink);
+}
+.axon-btn-secondary:disabled { color: var(--text-dim); border-left-color: var(--text-dim); cursor: default; }
+.axon-btn-text {
+  background: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+.axon-btn-text:hover { text-decoration-color: currentColor; }
+
+/* No motion when the viewer asks for less: surfaces appear at rest, presses do not move. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .axon-press:active,
+  .axon-btn-primary:active,
+  .axon-btn-secondary:active { transform: none; }
+}

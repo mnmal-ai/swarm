@@ -1,0 +1,11 @@
+{
+  "$comment": "MCP config stub copied in when the vercel suggestion is accepted. Merge the entry under mcpServers into each backend's config. Uses Vercel's hosted MCP endpoint via mcp-remote; auth happens through the browser OAuth flow on first connect.",
+  "mcpServers": {
+    "vercel": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.vercel.com"],
+      "env": {}
+    }
+  }
+}

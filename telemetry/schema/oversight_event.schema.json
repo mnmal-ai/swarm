@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mnmal-ai/swarm/telemetry/schema/oversight_event.schema.json",
+  "title": "OversightEvent",
+  "description": "One oversight-chain summary per gated invocation. Mirrors the TypeScript `OversightEvent` interface in @mnmal-ai/swarm-types (packages/types/src/telemetry.ts). Tracks the worker -> reviewer (-> arbiter -> human) escalation chain produced by packages/oversight.",
+  "type": "object",
+  "required": [
+    "session_id",
+    "worker_event_id",
+    "reviewer_verdict",
+    "retry_count",
+    "arbiter_involved",
+    "human_escalation",
+    "total_resolution_time_ms"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "description": "Session this oversight chain belongs to. Matches SwarmEvent.session_id of the worker call."
+    },
+    "worker_event_id": {
+      "type": "string",
+      "description": "The SwarmEvent.id of the worker invocation this chain reviews."
+    },
+    "reviewer_event_id": {
+      "type": "string",
+      "description": "SwarmEvent.id of the reviewer's invocation, when the reviewer ran. Absent when reviewer_verdict is \"skipped\"."
+    },
+    "reviewer_verdict": {
+      "type": "string",
+      "enum": ["approved", "rejected", "skipped"],
+      "description": "Reviewer's terminal decision. \"skipped\" when oversight was disabled or the worker output was empty (pre-review validation)."
+    },
+    "rejection_reasons": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Reviewer's listed reasons when reviewer_verdict is \"rejected\"."
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "description": "Number of retries the worker performed in response to reviewer rejections. Capped at 3 by policy."
+    },
+    "arbiter_involved": {
+      "type": "boolean",
+      "description": "Whether the arbiter was invoked to break a worker/reviewer deadlock."
+    },
+    "arbiter_event_id": {
+      "type": "string",
+      "description": "SwarmEvent.id of the arbiter's invocation, when one ran. Present iff arbiter_involved is true."
+    },
+    "arbiter_verdict": {
+      "type": "string",
+      "enum": ["approved", "rejected", "escalate"],
+      "description": "Arbiter's terminal decision. \"escalate\" hands the decision to a human."
+    },
+    "human_escalation": {
+      "type": "boolean",
+      "description": "Whether a human reviewer was asked to make the final call."
+    },
+    "human_decision": {
+      "type": "string",
+      "description": "Free-form decision text from the human escalation, when one occurred."
+    },
+    "human_response_time_minutes": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Wall-clock time the human took to respond, in minutes."
+    },
+    "total_resolution_time_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "End-to-end wall-clock time from worker invocation to terminal chain resolution, in milliseconds."
+    },
+    "review_skipped_reason": {
+      "type": "string",
+      "description": "When reviewer_verdict is \"skipped\", a short reason (\"oversight disabled\", \"empty worker output\", etc.)."
+    }
+  },
+  "additionalProperties": false
+}

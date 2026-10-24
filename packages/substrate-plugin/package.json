@@ -1,0 +1,51 @@
+{
+  "name": "@mnmal-ai/swarm-substrate-plugin",
+  "version": "1.0.0-alpha.0",
+  "description": "The swarm's Substrate coordinator plugin: the swarm, swarm-docs and swarm_meta namespaces.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./bootstrap": {
+      "types": "./dist/bootstrap.d.ts",
+      "import": "./dist/bootstrap.js"
+    }
+  },
+  "substrate": {
+    "tier": "coordinator",
+    "entry": "./dist/bootstrap.js",
+    "defaultConfig": "./default-config.json",
+    "configSchema": "./config.schema.json",
+    "configBasename": "swarm"
+  },
+  "files": [
+    "dist",
+    "default-config.json",
+    "config.schema.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node build.mjs && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=verbose --reporter=json --outputFile=test-results.json"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "peerDependencies": {
+    "@mnmal-ai/substrate": ">=1.0.0-alpha.0 <2.0.0"
+  },
+  "devDependencies": {
+    "@mnmal-ai/swarm-substrate-shared": "workspace:*",
+    "@mnmal-ai/context-render": "1.0.0-alpha.7",
+    "@mnmal-ai/substrate": "1.0.0-alpha.7",
+    "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

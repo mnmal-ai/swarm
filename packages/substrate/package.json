@@ -1,0 +1,31 @@
+{
+  "name": "@mnmal-ai/swarm-substrate",
+  "version": "1.0.0-alpha.0",
+  "description": "The swarm's Substrate client: an HTTP client for the swarm namespaces and the sidecar lifecycle (Node runtime, stack directories, spawn and stop).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=verbose --reporter=json --outputFile=test-results.json"
+  },
+  "dependencies": {
+    "@mnmal-ai/swarm-substrate-shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

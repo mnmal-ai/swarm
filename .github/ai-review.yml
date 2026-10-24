@@ -1,0 +1,35 @@
+pr_review:
+  model: claude-sonnet-5-5
+  ignore_paths:
+    - docs/**
+    - "**/*.md"
+    - LICENSE
+  perspectives:
+    - name: Architecture Expert
+      focus: "SDK design, module boundaries, Swarm class API surface, provider abstraction. Router/Loader/Executor/Oversight/Telemetry separation of concerns. Does the change respect the layered context model?"
+    - name: TypeScript Expert
+      focus: "Type safety, strict mode compliance, interface contracts with the swarm content repo. No default exports except the main Swarm class. Token estimation consistency (1 token ~ 4 chars)."
+    - name: Testing Expert
+      focus: "Test coverage for new code, assertion quality, E2E test reliability. Behavioral tests: do assertions test constraints, not content? Flaky test risk from non-deterministic output."
+    - name: Security Expert
+      focus: "API key handling (env vars only, never in telemetry events or logs). No secrets in JSONL telemetry output. Input sanitization, prompt injection risk."
+
+issue_triage:
+  model: claude-sonnet-5-5
+  repo_context: |
+    TypeScript monorepo that wraps AI agent calls with swarm-powered context loading,
+    typed oversight, and structured telemetry. Key modules: router (intent classification),
+    loader (context budget enforcement), executor (LLM provider abstraction), oversight
+    (Worker/Reviewer/Arbiter chain), orchestrator (task DAG), telemetry (Substrate entities),
+    and benchmark (behavioral test runner).
+  areas:
+    - router
+    - loader
+    - executor
+    - oversight
+    - orchestrator
+    - telemetry
+    - benchmark
+    - cli
+    - substrate
+    - types

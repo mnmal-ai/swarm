@@ -1,0 +1,5 @@
+{
+  "namespace": "swarm",
+  "contextNamespace": "cortext",
+  "drainstopIntervalMs": 3600000
+}

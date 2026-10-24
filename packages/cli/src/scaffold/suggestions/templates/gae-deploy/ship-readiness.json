@@ -1,0 +1,53 @@
+{
+  "$comment": "DRAFT ship-readiness checklist scaffolded by /prepare-for-swarm for Google App Engine. These gates must all pass before promoting to production.",
+  "platform": "gae",
+  "target": "Google App Engine",
+  "schemaVersion": "0.1.0",
+  "gates": [
+    {
+      "id": "tests-green",
+      "description": "Full test suite passes locally.",
+      "required": true
+    },
+    {
+      "id": "verify-gate",
+      "description": "Project verify/build gate exits 0.",
+      "required": true
+    },
+    {
+      "id": "build-clean",
+      "description": "Build step (`gcloud app deploy --no-promote --version preview`) succeeds with zero warnings.",
+      "required": true
+    },
+    {
+      "id": "no-secrets",
+      "description": "No secrets, keys, or credentials committed or inlined in config.",
+      "required": true
+    },
+    {
+      "id": "preview-verified",
+      "description": "Preview/staged deploy verified healthy (see verify-deployment-task.json).",
+      "required": true
+    },
+    {
+      "id": "rollback-known",
+      "description": "Previous good release identifier recorded; rollback command known.",
+      "required": true
+    },
+    {
+      "id": "migrations-forward",
+      "description": "Any data migrations are forward-only and reviewed.",
+      "required": false
+    },
+    {
+      "id": "pr-documented",
+      "description": "Deployed URL/version and verify result pasted into the PR description.",
+      "required": true
+    }
+  ],
+  "promoteCommand": "gcloud app services set-traffic --splits PRIOR=0,NEW=1",
+  "$comment-goalIds": "Optional. The user lists the goal IDs this gate should block, e.g. [\"goal-1\"]. Empty means the gate applies to no specific goal until filled in.",
+  "goalIds": [],
+  "$comment-smokeEndpoints": "Optional. Each entry is { url, expectStatus, jsonPath, expectEquals }: poll url, assert HTTP status === expectStatus, and optionally assert the JSON value at jsonPath equals expectEquals.",
+  "smokeEndpoints": []
+}

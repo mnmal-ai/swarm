@@ -1,0 +1,13 @@
+{
+  "$comment": "MCP config stub copied in when the github suggestion is accepted. Merge the entry under mcpServers into each backend's config. The token reads from GITHUB_TOKEN — never commit a PAT into this file.",
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$comment": "DRAFT verify-deployment task scaffolded by /prepare-for-swarm for Vercel. Adapt acceptance criteria to your project before relying on it.",
+  "id": "verify-vercel-deployment",
+  "title": "Verify Vercel deployment",
+  "axis": "deployment-completion",
+  "platform": "vercel",
+  "mode": "verification",
+  "description": "Confirm the latest Vercel deploy is live and healthy without modifying source. If verification fails because the deploy is broken, capture the failure and report it — do not edit production code to make the check pass.",
+  "steps": [
+    "Confirm the build artifact exists and the deploy command (`vercel deploy --prebuilt`) completed without error.",
+    "Vercel posts the deployment URL as a status check; confirm a 200 from the served URL before promoting.",
+    "Confirm no error-level logs in the first minute after deploy.",
+    "Record the deployed URL/version and the health-check result."
+  ],
+  "acceptance_criteria": [
+    "Deploy command exited 0.",
+    "Health check returns a successful (2xx / ready) response.",
+    "No new error-level logs attributable to this release.",
+    "Deployed URL/version recorded in the task output."
+  ],
+  "constraints": [
+    "Verification only — do not modify source to make the check pass.",
+    "Do not promote to production from this task; promotion is a separate explicit step."
+  ]
+}

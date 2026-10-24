@@ -1,0 +1,20 @@
+{
+  "name": "@mnmal-ai/swarm-orchestrator",
+  "version": "1.0.0-alpha.0",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=verbose --reporter=json --outputFile=test-results.json --coverage --coverage.reporter=json-summary --coverage.reporter=text"
+  },
+  "dependencies": {
+    "@mnmal-ai/swarm-types": "workspace:*",
+    "@mnmal-ai/swarm-events": "workspace:*",
+    "@mnmal-ai/swarm-substrate": "workspace:*"
+  },
+  "devDependencies": {
+    "@mnmal-ai/swarm-substrate-plugin": "workspace:*"
+  }
+}

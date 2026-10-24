@@ -1,0 +1,40 @@
+{
+  "_description": "Expected route-to-file-to-role mappings for the content set under test: SWARM_PATH when set, else tests/fixtures/content. Defaults match the fixture's swarm.json. Override mechanism for forks.",
+  "_lastSynced": "2026-10-23",
+
+  "swarmPath": null,
+
+  "knownProjects": [],
+
+  "roles": {
+    "worker": { "tiers": "all" },
+    "reviewer": { "tiers": ["mode", "domain", "oversight"] },
+    "orchestrator": { "fixedIntent": "orchestration", "tiers": "all" }
+  },
+
+  "requiredTiers": ["core"],
+
+  "routes": {
+    "implementation": {
+      "core": ["core/style.md", "core/testing.md"]
+    },
+    "documentation": {
+      "core": ["core/style.md", "core/docs.md"]
+    },
+    "fallback": {
+      "core": ["core/style.md"]
+    }
+  },
+
+  "regressionChecks": [
+    {
+      "id": "implementation-must-load-testing",
+      "route": "implementation",
+      "tier": "core",
+      "filePattern": "testing.md",
+      "reason": "Implementation work ships with tests, so the testing guidance must load for it."
+    }
+  ],
+
+  "overrides": {}
+}
