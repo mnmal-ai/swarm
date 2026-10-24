@@ -575,7 +575,7 @@ Not automated, by decision. For each project:
 4. Copy `~/.brain/config.json` to `~/.swarm/config.json`; rename `hydra_url`
    to `substrate_url` or delete it, and drop `postgres_url` and `db_mode` (or
    re-run `swarm db setup`).
-5. Re-seed content with `swarm seed`; Hydra stores are not reusable.
+5. Re-sync content with `swarm sync`; Hydra stores are not reusable.
 6. Rename task labels on the project's board (`brain:*` to `swarm:*`), or
    keep both while brain still runs.
 7. Replace the agent files swarm writes (`prepare-for-swarm.md`,
