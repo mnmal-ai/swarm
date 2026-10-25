@@ -30,6 +30,7 @@
 - Logging only through plan 02's `createLogger(name)`; no `console.log` in `packages/os/src`.
 - Tests are vitest files under `packages/os/tests/`, on `MemoryOsStore`, `FakeClock`, `FakeEventHub`, `FakeLauncher`, `FakeBoardClient`, `FetchStub`, `FakeRoomOpener` and in-test fakes: no network, no real `~/.swarm`, temp dirs only from `mkdtemp`, `ANTHROPIC_API_KEY` unset. A test about an event asserts what was published and who may see it.
 - No new GitHub workflows and no trigger changes.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 15 records the rows.
 - **Package gate**, the last check of every task: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run` passes every file, and `pnpm --filter @mnmal-ai/swarm-os build` exits 0.
 
 ## Review Focus
@@ -2556,7 +2557,7 @@ describe("instance routes", () => {
 
   it("post forwarded events into the instance room as event messages from the instance", async () => {
     const { h, send, row } = await setup();
-    const events = [{ event: "task:started", payload: { taskId: "t1", title: "Add index" }, at: "2026-10-25T09:00:01.000Z" }, { event: "os:events_dropped", payload: { dropped: 12 }, at: "2026-10-25T09:00:02.000Z" }];
+    const events = [{ event: "task:started", payload: { taskId: "t1", title: "Add index" }, at: "2026-10-25T09:00:01.000Z" }, { event: "os:events_dropped", payload: { count: 12 }, at: "2026-10-25T09:00:02.000Z" }];
     expect(await send("POST", "/api/instances/:id/events", { body: { events } })).toEqual({ status: 200, body: { ok: true, accepted: 2 } });
     const posted = (await h.store.messages.find({ roomId: row.roomId })).filter((m) => m.kind === "event");
     expect(posted.map((m) => [m.fromKind, m.body])).toEqual([["instance", "task:started"], ["instance", "os:events_dropped"]]);
@@ -2677,4 +2678,593 @@ Expected: PASS (11 tests, plus `brain-module.test.ts`'s). Then the package gate,
 ```bash
 git add packages/os/src/dispatch/instance-routes.ts packages/os/src/dispatch/mount.ts packages/os/src/dispatch/brain-module.ts packages/os/src/index.ts packages/os/tests/dispatch/instance-routes.test.ts packages/os/tests/dispatch/mount.test.ts packages/os/tests/dispatch/brain-module.test.ts
 git commit -m "feat(os): instance routes and the dispatch module in the brain"
+```
+
+---
+
+### Task 15: Metrics
+
+Ingress and dispatch's share of the owner's metrics requirement: every board API call and rate-limit hit, every poll and webhook, the three latencies the first proof is about (card seen to decision, to dispatch, and to its instance attaching; seen is the first poll or webhook that reported that card version), every decision and policy check, the serialisation queues, the launcher, the instance lifecycle, the resource snapshot as gauges, and `POST /api/instances/:id/metrics`, which keeps each instance's latest forwarded snapshot for plan 03's `GET /api/metrics`.
+
+**Files:**
+- Create: `packages/os/src/dispatch/card-seen.ts`, `packages/os/src/dispatch/instance-metrics.ts`
+- Modify: `packages/metrics/src/catalogue/os.ts` (this plan's block, in the `// plan 04` slot of `OS_METRICS`)
+- Modify: `packages/os/src/ingress/board-client.ts`, `packages/os/src/ingress/trello-api.ts`, `packages/os/src/ingress/github-api.ts`, `packages/os/src/ingress/poller.ts`, `packages/os/src/ingress/webhooks.ts`
+- Modify: `packages/os/src/dispatch/queue.ts`, `packages/os/src/dispatch/checks.ts`, `packages/os/src/dispatch/dispatcher.ts`, `packages/os/src/dispatch/instances.ts`, `packages/os/src/dispatch/instance-routes.ts`, `packages/os/src/dispatch/mount.ts`, `packages/os/src/dispatch/brain-module.ts`
+- Modify: `packages/os/src/launcher/launcher.ts`, `packages/os/src/launcher/local.ts`, `packages/os/src/resources/resources.ts`
+- Modify: `packages/os/src/testing/fetch-stub.ts` (`StubReply.headers`), `packages/os/src/index.ts` (the `// plan 04` block)
+- Modify: `packages/os/tests/dispatch/harness.ts` (a `metrics` option), `packages/os/tests/dispatch/instance-routes.test.ts`, `packages/os/tests/dispatch/mount.test.ts`, `packages/os/tests/dispatch/brain-module.test.ts` (each route list gains `POST /api/instances/:id/metrics`, after `sessions`; eleven routes become twelve)
+- Test: `packages/os/tests/metrics/ingress-metrics.test.ts`, `packages/os/tests/metrics/dispatch-metrics.test.ts`, `packages/os/tests/metrics/instance-metrics.test.ts`
+
+**Interfaces:**
+- Consumes: `Metrics`, `noopMetrics`, `MetricsSnapshot`, `OS_METRICS` from `@mnmal-ai/swarm-metrics`, `testRegistry` from `@mnmal-ai/swarm-metrics/testing` (plan 10; `packages/os` depends on it since plan 02's Task 11); `hist`, `counter`, `gauge` from `packages/os/tests/metrics/helpers.ts` (plan 02); `MetricsForwardBody` (plan 01, `os-protocol.ts`); from plan 03's `BrainContext`: `metrics` (the brain's registry) and `metricsSink` (its `JsonlMetricsSink`), and `BrainServices.instanceMetrics`, the port plan 03's `GET /api/metrics` reads, which `InstanceMetricsStore` satisfies; Tasks 1 to 14.
+- Produces:
+
+```ts
+// packages/os/src/ingress/board-client.ts
+export type BoardApiOp = "lists" | "list_cards" | "card" | "issues" | "issue";
+export interface BoardApiMeter { metrics: Metrics; source: BoardClient["kind"]; op: BoardApiOp }
+export function fetchJson<T>(fetch: FetchLike, url: string, init: RequestInit, timeoutMs?: number, meter?: BoardApiMeter): Promise<T>;
+export function statusClass(status: number): string;                     // "2xx", "3xx", "4xx", "5xx"
+// trello-api.ts, github-api.ts
+export interface TrelloApiOptions { /* Task 2's */ metrics?: Metrics }
+export interface GitHubApiOptions { /* Task 3's */ metrics?: Metrics }
+// poller.ts: deps gain `metrics?: Metrics`; `dispatcher` becomes Pick<Dispatcher, "decideCard" | "noteQueue" | "reevaluateHolds" | "seen">
+// webhooks.ts
+export interface WebhookDeps { /* Task 13's */ metrics?: Metrics; clock?: Clock; see?: (ref: CardRef, version: string, source: "webhook", at: Date) => void }
+export function ingestRefs(deps: WebhookDeps, client: BoardClient, refs: CardRef[], arrived?: Date): Promise<void>;
+
+// packages/os/src/dispatch/queue.ts
+export class KeyedQueue { constructor(opts?: { metrics?: Metrics; queue?: "dispatch" | "poller" }); run<T>(key: string, task: () => Promise<T>): Promise<T> }
+export function lockKind(key: string): "board" | "limits" | "instance";   // "limits"; "instance:<id>"; anything else is a board id
+
+// packages/os/src/dispatch/card-seen.ts
+export type SeenSource = "poll" | "webhook";
+export interface Sighting { at: Date; source: SeenSource; decided: boolean }
+export class CardSeen {
+  constructor(opts: { clock: Clock; maxEntries?: number });              // default 10_000; past it the oldest sighting is forgotten
+  see(ref: CardRef, version: string, source: SeenSource, at?: Date): void;   // keeps the first sighting of each (card, version); at defaults to clock.now()
+  sighting(ref: CardRef, version: string): Sighting | null;
+  firstDecision(ref: CardRef, version: string): Sighting | null;          // the sighting the first time it is asked for that version, then null
+  bindInstance(instanceId: string, ref: CardRef, version: string): void;
+  takeInstance(instanceId: string): Sighting | null;                      // once per instance
+}
+
+// packages/os/src/dispatch/checks.ts
+export interface ChainContext { /* Task 5's */ metrics?: Metrics }
+export function timedCheck<T extends CheckResult>(metrics: Metrics, name: CheckName, run: () => Promise<T>): Promise<T>;
+
+// packages/os/src/dispatch/dispatcher.ts
+// Dispatcher deps gain `metrics?: Metrics`; the class gains `readonly seen: CardSeen`
+
+// packages/os/src/dispatch/instances.ts
+export type LifetimeOutcome = "completed" | "nothing_to_do" | "paused" | "stopped" | "login_expired" | "failed" | "gone" | "spawn_failed";
+export function lifetimeOutcome(state: InstanceRow["state"], exitReason: string | null): LifetimeOutcome;
+// RunControl deps gain `metrics?: Metrics`
+
+// packages/os/src/dispatch/instance-metrics.ts
+export const INSTANCE_RECORD_EVERY_MS = 300_000;
+export const INSTANCE_ENDED_KEEP_MS = 3_600_000;
+export interface InstanceMetricsRecord { r: "instance"; instanceId: string; at: number; snapshot: MetricsSnapshot }
+export const MetricsForwardSchema: z.ZodType<MetricsForwardBody<MetricsSnapshot>>;   // at a number; defs, counters, gauges, histograms arrays of the shapes MetricsSnapshot names
+export class InstanceMetricsStore {
+  constructor(opts: { clock: Clock; write?: (record: InstanceMetricsRecord) => void; metrics?: Metrics; maxEntries?: number });   // maxEntries default 200
+  put(instanceId: string, snapshot: MetricsSnapshot): void;              // keeps it as the instance's latest; appends a record when none was appended for it in the last INSTANCE_RECORD_EVERY_MS
+  settle(instanceId: string): void;                                       // the instance ended: append its latest unless already appended; forget it INSTANCE_ENDED_KEEP_MS later
+  latest(): Record<string, { at: number; snapshot: MetricsSnapshot }>;    // at: epoch ms the brain received it
+}
+
+// packages/os/src/dispatch/instance-routes.ts
+export interface InstanceRouteDeps { /* Task 14's */ metrics?: Metrics; instanceMetrics?: InstanceMetricsStore }   // a private store when absent
+// adds POST /api/instances/:id/metrics, auth ["instance"], body MetricsForwardBody → 200 { ok: true }
+export function postInstanceEvents(deps: Pick<InstanceRouteDeps, "store" | "opener" | "metrics">, instanceId: string, events: ForwardedEvent[]): Promise<number>;
+
+// packages/os/src/launcher/launcher.ts
+export function meteredLauncher(launcher: Launcher, metrics: Metrics): Launcher;   // same kind, every call timed
+// local.ts: LocalLauncherOptions gains `metrics?: Metrics`; resources.ts: ResourceMonitor deps gain `metrics?: Metrics`
+
+// packages/os/src/dispatch/mount.ts
+export interface MountDeps { /* Task 14's */ metrics?: Metrics; writeMetricsRecord?: (record: InstanceMetricsRecord) => void }
+export interface DispatchModule { /* Task 14's */ instanceMetrics: InstanceMetricsStore }
+export function createBoardClients(config: OsConfig, store: OsStore, fetch?: FetchLike, metrics?: Metrics): BoardClients;
+
+// packages/os/tests/dispatch/harness.ts
+export function harness(opts?: { registration?: Partial<RegistrationRow>; limits?: Partial<OsConfig["limits"]>; metrics?: Metrics }): Promise<Harness>;   // the Dispatcher (and restart()'s) get the metrics
+```
+
+Catalogue rows. Durations taken across the brain's restarts, or measured against card sightings, use the brain's `Clock` (`FakeClock` in tests); every other duration is a span on the registry's monotonic clock. `board` is the registered board's id.
+
+| Name | Kind | Unit | Labels (values) | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_ingress_board_api_seconds` | histogram | seconds | `source` (`trello`, `github`), `op` (`BoardApiOp`), `outcome` (status class `2xx` to `5xx`, `timeout`, `network`) | `fetchJson`, given the meter `TrelloApiClient` and `GitHubApiClient` pass for each request |
+| `swarm_os_ingress_board_rate_limited_total` | counter | count | `source`, `op` | `fetchJson`: a 429, or a 403 whose `x-ratelimit-remaining` is `0` |
+| `swarm_os_ingress_poll_seconds` | histogram | seconds | `source` (`trello`, `github`, `unknown`), `outcome` (`ok`, `no_registration`, a `BoardApiErrorCode`, `error`) | `Poller`'s one-board poll, inside its key |
+| `swarm_os_ingress_poll_listed_cards` | histogram | count | `source` | the same, cards listed per good poll |
+| `swarm_os_ingress_poll_new_cards` | histogram | count | `source` | the same, card versions it handed to `decideCard` |
+| `swarm_os_ingress_webhooks_total` | counter | count | `source`, `outcome` (`accepted`, `rejected`, `malformed`, `unknown_board`, `no_credentials`) | the two `POST /hooks/…` handlers, beside `WebhookCounters` |
+| `swarm_os_ingress_ingest_seconds` | histogram | seconds | `source`, `outcome` (`ok`, `error`) | `ingestRefs`, the work after the reply |
+| `swarm_os_dispatch_card_seen_to_decision_seconds` | histogram | seconds | `source` (`SeenSource`), `outcome` (a decision outcome) | `Dispatcher`, where a version's first decision row is stored (`dispatchLocked` step 2, `decideCard` step 6) |
+| `swarm_os_dispatch_card_seen_to_dispatch_seconds` | histogram | seconds | `source`, `by` (`policy`, `command`) | `dispatchLocked`, after `launcher.start` resolves |
+| `swarm_os_dispatch_card_seen_to_attach_seconds` | histogram | seconds | `source` | `Dispatcher.onAttach` |
+| `swarm_os_dispatch_decisions_total` | counter | count | `outcome`, `check` (the first failing `CheckName`, or `none`), `via` (`card`, `reevaluation`, `command`) | `Dispatcher`'s one private helper that calls the `onDecision` listeners |
+| `swarm_os_dispatch_check_seconds` | histogram | seconds | `check` (`CheckName`), `outcome` (`passed`, `failed`, `error`) | `timedCheck`, around each check in `runChain` and the two re-checks in `dispatchLocked` |
+| `swarm_os_dispatch_decision_to_start_seconds` | histogram | seconds | `outcome` (`started`, `spawn_failed`) | `dispatchLocked`: from the stored decision to `launcher.start` settling |
+| `swarm_os_dispatch_lock_wait_seconds` | histogram | seconds | `queue` (`dispatch`, `poller`), `key` (`board`, `limits`, `instance`), `outcome` (`ok`) | `KeyedQueue.run`: from the call to the task starting |
+| `swarm_os_dispatch_lock_tasks` | gauge | count | `queue`, `key` | `KeyedQueue.run`: tasks waiting or running |
+| `swarm_os_dispatch_queue_cards` | gauge | count | `board` | `Dispatcher.noteQueue` |
+| `swarm_os_dispatch_held_cards` | gauge | count | `board` | `Dispatcher.reevaluateHolds`: held entries left after its re-run |
+| `swarm_os_launcher_op_seconds` | histogram | seconds | `launcher` (`local`, `remote`, `fake`), `op` (`start`, `status`, `stop`, `resources`), `outcome` (`ok`, `error`, and `running` or `gone` for `status`) | `meteredLauncher` |
+| `swarm_os_launcher_child_exits_total` | counter | count | `outcome` (`ok`, `error`, `signal`) | `LocalLauncher`, on each child's `exit` |
+| `swarm_os_launcher_cpu_load`, `swarm_os_launcher_cpus`, `swarm_os_launcher_mem_free_bytes`, `swarm_os_launcher_mem_total_bytes`, `swarm_os_launcher_instances_running`, `swarm_os_launcher_claude_sessions`, `swarm_os_launcher_ports_in_use`, `swarm_os_launcher_last_hour_tokens` | gauge | ratio, count, bytes, bytes, count, count, count, tokens | none | `ResourceMonitor.sample()`: `cpuLoad1`, `cpus`, `memFreeMb` and `memTotalMb` × 1,048,576, `instancesRunning`, `claudeSessions`, `portsInUse.length`, and the sum of `tokensThisHour` |
+| `swarm_os_instance_launch_to_attach_seconds` | histogram | seconds | `launcher` | `Dispatcher.onAttach`: now minus the row's `startedAt` |
+| `swarm_os_instance_live` | gauge | count | `state` (`dispatching`, `running`, `unresponsive`) | the end of `Dispatcher.sweep()` |
+| `swarm_os_instance_lifetime_seconds` | histogram | seconds | `outcome` (`LifetimeOutcome`) | `Dispatcher.onExit`, the sweep's `gone` path, and `dispatchLocked`'s spawn failure: `endedAt` minus `startedAt` |
+| `swarm_os_instance_heartbeat_interval_seconds` | histogram | seconds | none | `Dispatcher.onHeartbeat`: now minus the previous `lastHeartbeatAt` |
+| `swarm_os_instance_dead_total` | counter | count | `reason` (`unresponsive`, `gone`, `detached`) | `Dispatcher.sweep()`, beside each of those notices |
+| `swarm_os_instance_recovered_total` | counter | count | none | `Dispatcher.onHeartbeat`, beside `recovered` |
+| `swarm_os_instance_stop_escalations_total` | counter | count | none | `Dispatcher.sweep()` step 3 |
+| `swarm_os_instance_control_total` | counter | count | `action` (`pause`, `stop_graceful`, `stop_immediate`, `resume`, `retry`, `republish`), `outcome` (`stream`, `launcher`, `dispatched`, `refused`, `failed`) | `RunControl` |
+| `swarm_os_instance_event_batch_seconds` | histogram | seconds | `outcome` (`ok`, `error`) | `postInstanceEvents` |
+| `swarm_os_instance_event_batch_events` | histogram | count | none | `postInstanceEvents` |
+| `swarm_os_instance_events_dropped_total` | counter | count | none | `postInstanceEvents`: the `count` of each `os:events_dropped` event (plan 01's payload) |
+| `swarm_os_instance_sessions_total` | counter | count | `role` (`SessionRole`) | `POST /api/instances/:id/sessions` |
+| `swarm_os_instance_metrics_entries` | gauge | count | none | `InstanceMetricsStore`, on every put, settle and prune |
+
+The `MetricDef` entries, appended in the `// plan 04` slot:
+
+```ts
+  // plan 04
+  { name: "swarm_os_ingress_board_api_seconds", kind: "histogram", unit: "seconds", help: "Board API calls, by source, operation and status class", labels: ["source", "op", "outcome"] },
+  { name: "swarm_os_ingress_board_rate_limited_total", kind: "counter", unit: "count", help: "Board API calls refused for rate, by source and operation", labels: ["source", "op"] },
+  { name: "swarm_os_ingress_poll_seconds", kind: "histogram", unit: "seconds", help: "One board poll, by source and outcome", labels: ["source", "outcome"] },
+  { name: "swarm_os_ingress_poll_listed_cards", kind: "histogram", unit: "count", help: "Cards each good poll listed", labels: ["source"] },
+  { name: "swarm_os_ingress_poll_new_cards", kind: "histogram", unit: "count", help: "Card versions each good poll found undecided", labels: ["source"] },
+  { name: "swarm_os_ingress_webhooks_total", kind: "counter", unit: "count", help: "Webhook deliveries, by source and outcome", labels: ["source", "outcome"] },
+  { name: "swarm_os_ingress_ingest_seconds", kind: "histogram", unit: "seconds", help: "The work after a webhook's reply, by source and outcome", labels: ["source", "outcome"] },
+  { name: "swarm_os_dispatch_card_seen_to_decision_seconds", kind: "histogram", unit: "seconds", help: "From a card version's first sighting to its first decision", labels: ["source", "outcome"] },
+  { name: "swarm_os_dispatch_card_seen_to_dispatch_seconds", kind: "histogram", unit: "seconds", help: "From a card version's first sighting to launcher.start returning", labels: ["source", "by"] },
+  { name: "swarm_os_dispatch_card_seen_to_attach_seconds", kind: "histogram", unit: "seconds", help: "From a card version's first sighting to its instance attaching", labels: ["source"] },
+  { name: "swarm_os_dispatch_decisions_total", kind: "counter", unit: "count", help: "Dispatch decisions, by outcome, deciding check and path", labels: ["outcome", "check", "via"] },
+  { name: "swarm_os_dispatch_check_seconds", kind: "histogram", unit: "seconds", help: "Each policy check, by check and outcome", labels: ["check", "outcome"] },
+  { name: "swarm_os_dispatch_decision_to_start_seconds", kind: "histogram", unit: "seconds", help: "From a dispatch decision to launcher.start settling", labels: ["outcome"] },
+  { name: "swarm_os_dispatch_lock_wait_seconds", kind: "histogram", unit: "seconds", help: "Time work waited for its key, by queue and key kind", labels: ["queue", "key", "outcome"] },
+  { name: "swarm_os_dispatch_lock_tasks", kind: "gauge", unit: "count", help: "Work waiting for or holding a key, by queue and key kind", labels: ["queue", "key"] },
+  { name: "swarm_os_dispatch_queue_cards", kind: "gauge", unit: "count", help: "Cards in a board's queue column at its last listing", labels: ["board"] },
+  { name: "swarm_os_dispatch_held_cards", kind: "gauge", unit: "count", help: "Queued cards held by policy at the last re-evaluation", labels: ["board"] },
+  { name: "swarm_os_launcher_op_seconds", kind: "histogram", unit: "seconds", help: "Launcher calls, by launcher kind, op and outcome", labels: ["launcher", "op", "outcome"] },
+  { name: "swarm_os_launcher_child_exits_total", kind: "counter", unit: "count", help: "Runs the local launcher saw exit, by how", labels: ["outcome"] },
+  { name: "swarm_os_launcher_cpu_load", kind: "gauge", unit: "ratio", help: "One-minute load average at the last resource sample", labels: [] },
+  { name: "swarm_os_launcher_cpus", kind: "gauge", unit: "count", help: "CPUs at the last resource sample", labels: [] },
+  { name: "swarm_os_launcher_mem_free_bytes", kind: "gauge", unit: "bytes", help: "Free memory at the last resource sample", labels: [] },
+  { name: "swarm_os_launcher_mem_total_bytes", kind: "gauge", unit: "bytes", help: "Total memory at the last resource sample", labels: [] },
+  { name: "swarm_os_launcher_instances_running", kind: "gauge", unit: "count", help: "Live instances at the last resource sample", labels: [] },
+  { name: "swarm_os_launcher_claude_sessions", kind: "gauge", unit: "count", help: "Claude Code processes at the last resource sample", labels: [] },
+  { name: "swarm_os_launcher_ports_in_use", kind: "gauge", unit: "count", help: "Dashboard ports held by live instances", labels: [] },
+  { name: "swarm_os_launcher_last_hour_tokens", kind: "gauge", unit: "tokens", help: "Tokens used by instances in the last hour", labels: [] },
+  { name: "swarm_os_instance_launch_to_attach_seconds", kind: "histogram", unit: "seconds", help: "From an instance's start to its run attaching, by launcher kind", labels: ["launcher"] },
+  { name: "swarm_os_instance_live", kind: "gauge", unit: "count", help: "Live instances, by state", labels: ["state"] },
+  { name: "swarm_os_instance_lifetime_seconds", kind: "histogram", unit: "seconds", help: "From an instance's start to its end, by outcome", labels: ["outcome"] },
+  { name: "swarm_os_instance_heartbeat_interval_seconds", kind: "histogram", unit: "seconds", help: "Time between an instance's heartbeats, as received", labels: [] },
+  { name: "swarm_os_instance_dead_total", kind: "counter", unit: "count", help: "Instances declared unresponsive, gone or detached", labels: ["reason"] },
+  { name: "swarm_os_instance_recovered_total", kind: "counter", unit: "count", help: "Unresponsive instances whose heartbeats resumed", labels: [] },
+  { name: "swarm_os_instance_stop_escalations_total", kind: "counter", unit: "count", help: "Immediate stops the sweep signalled through the launcher", labels: [] },
+  { name: "swarm_os_instance_control_total", kind: "counter", unit: "count", help: "Run control requests, by action and how they were delivered", labels: ["action", "outcome"] },
+  { name: "swarm_os_instance_event_batch_seconds", kind: "histogram", unit: "seconds", help: "Posting one forwarded event batch into its room", labels: ["outcome"] },
+  { name: "swarm_os_instance_event_batch_events", kind: "histogram", unit: "count", help: "Events in each forwarded batch", labels: [] },
+  { name: "swarm_os_instance_events_dropped_total", kind: "counter", unit: "count", help: "Events runs reported dropping before they reached the brain", labels: [] },
+  { name: "swarm_os_instance_sessions_total", kind: "counter", unit: "count", help: "Room sessions minted for instances, by role", labels: ["role"] },
+  { name: "swarm_os_instance_metrics_entries", kind: "gauge", unit: "count", help: "Instances whose forwarded snapshot the brain holds", labels: [] },
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// packages/os/tests/metrics/ingress-metrics.test.ts
+import { describe, it, expect } from "vitest";
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { BoardApiError } from "../../src/ingress/board-client.js";
+import { TrelloApiClient, TRELLO_CARD_FIELDS, trelloCallbackUrl, trelloSignature } from "../../src/ingress/trello-api.js";
+import { GitHubApiClient } from "../../src/ingress/github-api.js";
+import { Poller } from "../../src/ingress/poller.js";
+import { webhookRoutes, WebhookCounters, type WebhookDeps } from "../../src/ingress/webhooks.js";
+import { DispatchRooms } from "../../src/dispatch/room-opener.js";
+import type { ApiCall } from "../../src/dispatch/host.js";
+import { FakeBoardClient, FakeClock, FetchStub, MemoryOsStore } from "../../src/testing/index.js";
+import { harness } from "../dispatch/harness.js";
+import { T0, boardCard, boardRow, testConfig, silentLog } from "../dispatch/fixtures.js";
+import { counter, gauge, hist } from "./helpers.js";
+
+const API = "https://api.trello.com/1";
+const BOARD = boardRow();
+const GH_BOARD = boardRow({ id: "board-g", kind: "github", externalId: "owner-a/repo-a", name: "repo-a", queueColumn: "swarm:goal", webhookSecret: "hook-secret-a" });
+const boards = { get: async (id: string) => (id === "board-a" ? BOARD : id === "board-g" ? GH_BOARD : null) };
+
+describe("board API metrics", () => {
+  it("times every call by source, operation and status class, and counts rate limits", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const stub = new FetchStub()
+      .on("GET", `${API}/boards/${BOARD.externalId}/lists?fields=id,name&filter=open`, { json: [{ id: "list-2", name: "To Do" }] })
+      .on("GET", `${API}/lists/list-2/cards?fields=${TRELLO_CARD_FIELDS}&checklists=all`, { json: [] })
+      .on("GET", /\/cards\/gone1\?/, { status: 404 })
+      .on("GET", /\/cards\/slow1\?/, { status: 429 })
+      .on("GET", /\/cards\/hang1\?/, { hang: true })
+      .on("GET", /\/repos\/owner-a\/repo-a\/issues\?/, { status: 403, headers: { "x-ratelimit-remaining": "0" }, text: "API rate limit exceeded" });
+    const trello = new TrelloApiClient({ key: "key-a", token: "token-a", boards, fetch: stub.fetch, timeoutMs: 20, metrics });
+    const github = new GitHubApiClient({ token: "ghp_test_a", boards, fetch: stub.fetch, timeoutMs: 20, metrics });
+    await trello.listQueue(BOARD);
+    await trello.getCard({ boardId: "board-a", cardId: "gone1" });
+    for (const cardId of ["slow1", "hang1"]) await trello.getCard({ boardId: "board-a", cardId }).catch(() => {});
+    await github.listQueue(GH_BOARD).catch(() => {});
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_os_ingress_board_api_seconds", { source: "trello", op: "lists", outcome: "2xx" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_ingress_board_api_seconds", { source: "trello", op: "list_cards", outcome: "2xx" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_ingress_board_api_seconds", { source: "trello", op: "card", outcome: "4xx" })?.count).toBe(2);
+    expect(hist(s, "swarm_os_ingress_board_api_seconds", { source: "trello", op: "card", outcome: "timeout" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_ingress_board_api_seconds", { source: "github", op: "issues", outcome: "4xx" })?.count).toBe(1);
+    expect(counter(s, "swarm_os_ingress_board_rate_limited_total", { source: "trello", op: "card" })).toBe(1);
+    expect(counter(s, "swarm_os_ingress_board_rate_limited_total", { source: "github", op: "issues" })).toBe(1);
+  });
+});
+
+describe("poll metrics", () => {
+  it("times each poll by source and outcome, counts listed and new cards, and records each version's first sighting", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ metrics });
+    const fake = new FakeBoardClient("trello");
+    fake.setQueue("board-a", [boardCard(1), boardCard(2)]);
+    const poller = new Poller({ store: h.store, boards: { trello: fake }, dispatcher: h.dispatcher, rooms: new DispatchRooms({ store: h.store, opener: h.opener, config: h.config }), config: h.config, clock: h.clock, log: silentLog, metrics });
+    await poller.pollNow("board-a");
+    h.clock.advance(120_000);
+    await poller.pollNow("board-a");
+    fake.failNext(new BoardApiError("rate_limited", "board API returned 429"), "board-a");
+    await poller.pollNow("board-a");
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_os_ingress_poll_seconds", { source: "trello", outcome: "ok" })?.count).toBe(2);
+    expect(hist(s, "swarm_os_ingress_poll_seconds", { source: "trello", outcome: "rate_limited" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_ingress_poll_listed_cards", { source: "trello" })).toMatchObject({ count: 2, sum: 4 });
+    expect(hist(s, "swarm_os_ingress_poll_new_cards", { source: "trello" })).toMatchObject({ count: 2, sum: 2 });
+    expect(gauge(s, "swarm_os_dispatch_queue_cards", { board: "board-a" })).toBe(2);
+    expect(h.dispatcher.seen.sighting(boardCard(1).ref, boardCard(1).version)).toEqual({ at: T0, source: "poll", decided: true });
+  });
+});
+
+describe("webhook metrics", () => {
+  it("counts deliveries by source and outcome, times the work after the reply, and records the sighting at arrival", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const trelloJson = { id: "5f00000000000000000000c1", shortLink: "abc123", name: "Add search", desc: "", idBoard: BOARD.externalId, idList: "list-2", labels: [], closed: false, dateLastActivity: "2026-10-25T08:00:00.000Z", url: "https://trello.com/c/abc123", checklists: [], list: { id: "list-2", name: "To Do" } };
+    const stub = new FetchStub().on("GET", `${API}/cards/5f00000000000000000000c1?fields=${TRELLO_CARD_FIELDS}&list=true&checklists=all`, { json: trelloJson });
+    const store = new MemoryOsStore();
+    await store.boards.put(BOARD);
+    const clock = new FakeClock(T0);
+    const seen: Array<[string, string, string, string]> = [];
+    const deps: WebhookDeps = {
+      store, config: testConfig(), counters: new WebhookCounters(), log: silentLog, metrics, clock,
+      decide: async () => { clock.advance(1_000); },
+      see: (ref, version, source, at) => { seen.push([ref.cardId, version, source, at.toISOString()]); },
+      boards: { trello: new TrelloApiClient({ key: "key-a", token: "token-a", boards: store.boards, fetch: stub.fetch, metrics }) },
+    };
+    const post = webhookRoutes(deps).find((r) => r.method === "POST" && r.path === "/hooks/trello/:boardId")!;
+    const call = (over: Partial<ApiCall>): ApiCall => ({ params: { boardId: "board-a" }, query: {}, headers: {}, body: undefined, rawBody: "", actor: null, ...over });
+    const RAW = '{"action":{"type":"updateCard","data":{"card":{"id":"5f00000000000000000000c1"}}}}';
+    const sign = (raw: string) => trelloSignature("app-secret-a", raw, trelloCallbackUrl("https://os.example", "board-a"));
+    await (await post.handler(call({ headers: { "x-trello-webhook": sign(RAW) }, rawBody: RAW }))).work;
+    await post.handler(call({ rawBody: RAW }));
+    await post.handler(call({ headers: { "x-trello-webhook": sign("not json") }, rawBody: "not json" }));
+    await post.handler(call({ params: { boardId: "board-z" }, rawBody: RAW }));
+    const s = metrics.snapshot();
+    for (const outcome of ["accepted", "rejected", "malformed", "unknown_board"]) expect(counter(s, "swarm_os_ingress_webhooks_total", { source: "trello", outcome }), outcome).toBe(1);
+    expect(hist(s, "swarm_os_ingress_ingest_seconds", { source: "trello", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_ingress_board_api_seconds", { source: "trello", op: "card", outcome: "2xx" })?.count).toBe(1);
+    expect(seen).toEqual([["abc123", "2026-10-25T08:00:00.000Z", "webhook", T0.toISOString()]]);
+  });
+});
+```
+
+```ts
+// packages/os/tests/metrics/dispatch-metrics.test.ts
+import { describe, it, expect } from "vitest";
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { KeyedQueue } from "../../src/dispatch/queue.js";
+import { harness, ev, type Harness } from "../dispatch/harness.js";
+import { boardCard, deferred } from "../dispatch/fixtures.js";
+import { counter, gauge, hist } from "./helpers.js";
+
+const finish = async (h: Harness, cardId: string) => {
+  const [row] = await h.store.instances.find({ cardId });
+  await h.dispatcher.onExit(row.id, { reason: "completed", code: 0 });
+};
+const CHECKS = ["known_board", "column_and_labels", "not_in_flight", "queue_depth", "resources", "ready"];
+
+describe("dispatch metrics", () => {
+  it("measures card seen to decision, to dispatch and to attach, and launch to attach", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ registration: { minCards: 1 }, metrics });
+    const card = boardCard(1);
+    h.dispatcher.seen.see(card.ref, card.version, "webhook");
+    h.clock.advance(2_000);
+    await h.dispatcher.decideCard(ev(card, "webhook"));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    h.clock.advance(8_000);
+    await h.dispatcher.onAttach(row.id, { runId: "run-1", dashboardUrl: null, pid: 4242 });
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_os_dispatch_card_seen_to_decision_seconds", { source: "webhook", outcome: "dispatch" })).toMatchObject({ count: 1, sum: 2 });
+    expect(hist(s, "swarm_os_dispatch_card_seen_to_dispatch_seconds", { source: "webhook", by: "policy" })).toMatchObject({ count: 1, sum: 2 });
+    expect(hist(s, "swarm_os_dispatch_card_seen_to_attach_seconds", { source: "webhook" })).toMatchObject({ count: 1, sum: 10 });
+    expect(hist(s, "swarm_os_instance_launch_to_attach_seconds", { launcher: "fake" })).toMatchObject({ count: 1, sum: 8 });
+    expect(hist(s, "swarm_os_dispatch_decision_to_start_seconds", { outcome: "started" })?.count).toBe(1);
+    expect(counter(s, "swarm_os_dispatch_decisions_total", { outcome: "dispatch", check: "none", via: "card" })).toBe(1);
+    for (const check of CHECKS) expect(hist(s, "swarm_os_dispatch_check_seconds", { check, outcome: "passed" })?.count, check).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps a version's first sighting, so a card held and drained later reports its whole wait", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ metrics });
+    const [c1, c2, c3] = [boardCard(1), boardCard(2), boardCard(3)];
+    for (const c of [c1, c2, c3]) h.dispatcher.seen.see(c.ref, c.version, "poll");
+    await h.dispatcher.noteQueue("board-a", [c1, c2, c3]);
+    await h.dispatcher.decideCard(ev(c1, "poll"));                 // dispatched: depth 3
+    await h.dispatcher.decideCard(ev(c2, "poll"));                 // held: project-a has 1 of 1 running
+    await h.dispatcher.reevaluateHolds("board-a");
+    expect(gauge(metrics.snapshot(), "swarm_os_dispatch_held_cards", { board: "board-a" })).toBe(1);
+    h.clock.advance(60_000);
+    await finish(h, "card-1");
+    await h.dispatcher.noteQueue("board-a", [c2, c3]);
+    await h.dispatcher.reevaluateHolds("board-a");                 // card-2 goes: the board is draining
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_os_dispatch_card_seen_to_dispatch_seconds", { source: "poll", by: "policy" })).toMatchObject({ count: 2, max: 60 });
+    expect(hist(s, "swarm_os_dispatch_card_seen_to_decision_seconds", { source: "poll", outcome: "hold" })).toMatchObject({ count: 1, sum: 0 });
+    expect(counter(s, "swarm_os_dispatch_decisions_total", { outcome: "hold", check: "not_in_flight", via: "card" })).toBe(1);
+    expect(counter(s, "swarm_os_dispatch_decisions_total", { outcome: "dispatch", check: "none", via: "reevaluation" })).toBe(1);
+    expect(gauge(s, "swarm_os_dispatch_held_cards", { board: "board-a" })).toBe(0);
+    expect(gauge(s, "swarm_os_dispatch_queue_cards", { board: "board-a" })).toBe(2);
+  });
+
+  it("times each policy check by check and outcome, up to the first that fails", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ metrics });
+    await h.dispatcher.decideCard(ev(boardCard(1)));               // depth 1 < min_cards 3
+    const s = metrics.snapshot();
+    for (const check of ["known_board", "column_and_labels", "not_in_flight"]) expect(hist(s, "swarm_os_dispatch_check_seconds", { check, outcome: "passed" })?.count, check).toBe(1);
+    expect(hist(s, "swarm_os_dispatch_check_seconds", { check: "queue_depth", outcome: "failed" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_dispatch_check_seconds", { check: "ready" })).toBeUndefined();
+    expect(counter(s, "swarm_os_dispatch_decisions_total", { outcome: "hold", check: "queue_depth", via: "card" })).toBe(1);
+  });
+
+  it("measures how long work waits for its key, by queue and key kind", async () => {
+    const { metrics, clock } = testRegistry(OS_METRICS);
+    const q = new KeyedQueue({ metrics, queue: "dispatch" });
+    const gate = deferred();
+    const a = q.run("board-a", async () => { await gate.promise; });
+    const b = q.run("board-a", async () => {});
+    await q.run("limits", async () => {});
+    await q.run("instance:inst-1", async () => {});
+    expect(gauge(metrics.snapshot(), "swarm_os_dispatch_lock_tasks", { queue: "dispatch", key: "board" })).toBe(2);
+    clock.advance(500);
+    gate.resolve();
+    await Promise.all([a, b]);
+    const s = metrics.snapshot();
+    expect(gauge(s, "swarm_os_dispatch_lock_tasks", { queue: "dispatch", key: "board" })).toBe(0);
+    expect(hist(s, "swarm_os_dispatch_lock_wait_seconds", { queue: "dispatch", key: "board", outcome: "ok" })).toMatchObject({ count: 2, max: 0.5 });
+    expect(hist(s, "swarm_os_dispatch_lock_wait_seconds", { queue: "dispatch", key: "limits" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_dispatch_lock_wait_seconds", { queue: "dispatch", key: "instance" })?.count).toBe(1);
+  });
+});
+```
+
+```ts
+// packages/os/tests/metrics/instance-metrics.test.ts
+import { describe, it, expect } from "vitest";
+import { OS_METRICS, type MetricsSnapshot } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { InstanceMetricsStore, type InstanceMetricsRecord } from "../../src/dispatch/instance-metrics.js";
+import { instanceRoutes } from "../../src/dispatch/instance-routes.js";
+import { RunControl } from "../../src/dispatch/instances.js";
+import { DispatchRooms } from "../../src/dispatch/room-opener.js";
+import { mountDispatch, type BrainHost } from "../../src/dispatch/mount.js";
+import type { ApiCall } from "../../src/dispatch/host.js";
+import { meteredLauncher, LaunchError } from "../../src/launcher/launcher.js";
+import { ResourceMonitor } from "../../src/resources/resources.js";
+import { FakeBoardClient, FakeClock, FakeEventHub, FakeLauncher, FakeRoomOpener, MemoryOsStore } from "../../src/testing/index.js";
+import { harness, ev, FakeTokens } from "../dispatch/harness.js";
+import { T0, boardCard, boardRow, registrationRow, testConfig, silentLog } from "../dispatch/fixtures.js";
+import { counter, gauge, hist } from "./helpers.js";
+
+const snap = (n: number): MetricsSnapshot => ({ at: n, defs: [], counters: [], gauges: [], histograms: [] });
+
+async function attachedRoutes() {
+  const { metrics } = testRegistry(OS_METRICS);
+  const h = await harness({ registration: { minCards: 1 }, metrics });
+  await h.dispatcher.decideCard(ev(boardCard(1)));
+  const [row] = await h.store.instances.find({ cardId: "card-1" });
+  const instanceMetrics = new InstanceMetricsStore({ clock: h.clock, metrics });
+  const routes = instanceRoutes({ store: h.store, dispatcher: h.dispatcher, opener: h.opener, tokens: h.tokens, clock: h.clock, log: silentLog, metrics, instanceMetrics });
+  const send = (method: string, path: string, over: Partial<ApiCall>) => routes.find((r) => r.method === method && r.path === path)!
+    .handler({ params: { id: row.id }, query: {}, headers: {}, body: undefined, rawBody: "", actor: { kind: "instance", instanceId: row.id }, ...over });
+  return { h, row, metrics, instanceMetrics, routes, send };
+}
+
+describe("instance lifecycle metrics", () => {
+  it("counts live states, heartbeat intervals, deaths and lifetimes by outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ registration: { minCards: 1 }, metrics });
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    await h.dispatcher.onAttach(row.id, { runId: "run-1", dashboardUrl: null, pid: 4242 });
+    h.clock.advance(15_000);
+    await h.dispatcher.onHeartbeat(row.id, { tokens: 1, phase: "working", currentTask: null });
+    h.clock.advance(14_000);
+    await h.dispatcher.onHeartbeat(row.id, { tokens: 2, phase: "working", currentTask: null });
+    await h.dispatcher.sweep();
+    let s = metrics.snapshot();
+    expect(hist(s, "swarm_os_instance_heartbeat_interval_seconds")).toMatchObject({ count: 2, sum: 29 });
+    expect(["running", "dispatching", "unresponsive"].map((state) => gauge(s, "swarm_os_instance_live", { state }))).toEqual([1, 0, 0]);
+    h.clock.advance(90_000);
+    await h.dispatcher.sweep();
+    h.launcher.setStatus(row.id, "gone");
+    await h.dispatcher.sweep();
+    s = metrics.snapshot();
+    expect(counter(s, "swarm_os_instance_dead_total", { reason: "unresponsive" })).toBe(1);
+    expect(counter(s, "swarm_os_instance_dead_total", { reason: "gone" })).toBe(1);
+    expect(hist(s, "swarm_os_instance_lifetime_seconds", { outcome: "gone" })).toMatchObject({ count: 1, sum: 119 });
+    expect(gauge(s, "swarm_os_instance_live", { state: "unresponsive" })).toBe(0);
+  });
+
+  it("counts run control by action and how it was delivered", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ registration: { minCards: 1 }, metrics });
+    const fake = new FakeBoardClient("trello");
+    fake.setQueue("board-a", [boardCard(1)]);
+    const runs = new RunControl({ store: h.store, dispatcher: h.dispatcher, launcher: h.launcher, hub: new FakeEventHub(), boards: { trello: fake }, rooms: new DispatchRooms({ store: h.store, opener: h.opener, config: h.config }), clock: h.clock, log: silentLog, metrics });
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    await runs.pause(row.id, "owner");                            // never attached: through the launcher
+    await h.dispatcher.onAttach(row.id, { runId: "run-1", dashboardUrl: null, pid: 4242 });
+    await runs.stop(row.id, "owner", "immediate");                // attached: through its stream
+    await runs.resume(row.id, "owner");                           // not paused
+    const s = metrics.snapshot();
+    expect(counter(s, "swarm_os_instance_control_total", { action: "pause", outcome: "launcher" })).toBe(1);
+    expect(counter(s, "swarm_os_instance_control_total", { action: "stop_immediate", outcome: "stream" })).toBe(1);
+    expect(counter(s, "swarm_os_instance_control_total", { action: "resume", outcome: "refused" })).toBe(1);
+  });
+
+  it("times every launcher call by kind, op and outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const inner = new FakeLauncher();
+    const launcher = meteredLauncher(inner, metrics);
+    const spec = { instanceId: "inst-1", registration: registrationRow(), cardId: "card-1", token: "inst_x", brainUrl: "http://127.0.0.1:3200" };
+    const handle = await launcher.start(spec);
+    await launcher.status(handle);
+    inner.setStatus("inst-1", "gone");
+    await launcher.status(handle);
+    await launcher.stop(handle, "graceful");
+    await launcher.resources();
+    inner.beforeStart = () => { throw new LaunchError("spawn failed"); };
+    await launcher.start({ ...spec, instanceId: "inst-2" }).catch(() => {});
+    const s = metrics.snapshot();
+    expect(launcher.kind).toBe("fake");
+    for (const [op, outcome] of [["start", "ok"], ["start", "error"], ["status", "running"], ["status", "gone"], ["stop", "ok"], ["resources", "ok"]]) {
+      expect(hist(s, "swarm_os_launcher_op_seconds", { launcher: "fake", op, outcome })?.count, `${op} ${outcome}`).toBe(1);
+    }
+  });
+
+  it("publishes each resource sample as gauges", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const launcher = new FakeLauncher();
+    launcher.snapshot = { host: "local", at: T0.toISOString(), cpuLoad1: 0.5, cpus: 8, memFreeMb: 4096, memTotalMb: 16384, instancesRunning: 1, claudeSessions: 2, portsInUse: [3141, 3142], tokensThisHour: { "project-a": 700, "project-b": 300 } };
+    await new ResourceMonitor({ store: new MemoryOsStore(), launcher, hub: new FakeEventHub(), clock: new FakeClock(T0), log: silentLog, metrics }).sample();
+    const s = metrics.snapshot();
+    expect(["cpu_load", "cpus", "mem_free_bytes", "mem_total_bytes", "instances_running", "claude_sessions", "ports_in_use", "last_hour_tokens"].map((n) => gauge(s, `swarm_os_launcher_${n}`)))
+      .toEqual([0.5, 8, 4096 * 1_048_576, 16384 * 1_048_576, 1, 2, 2, 1000]);
+  });
+});
+
+describe("instance metrics forwards", () => {
+  it("keeps each instance's latest snapshot and appends one record at most every five minutes, and at its end", () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const clock = new FakeClock(T0);
+    const written: InstanceMetricsRecord[] = [];
+    const store = new InstanceMetricsStore({ clock, write: (r) => written.push(r), metrics });
+    store.put("inst-a", snap(1));
+    clock.advance(15_000); store.put("inst-a", snap(2));
+    expect(store.latest()).toEqual({ "inst-a": { at: T0.getTime() + 15_000, snapshot: snap(2) } });
+    clock.advance(300_000); store.put("inst-a", snap(3));
+    clock.advance(15_000); store.put("inst-a", snap(4));
+    store.settle("inst-a"); store.settle("inst-a");
+    expect(written.map((r) => [r.r, r.instanceId, r.at, r.snapshot.at])).toEqual([
+      ["instance", "inst-a", T0.getTime(), 1], ["instance", "inst-a", T0.getTime() + 315_000, 3], ["instance", "inst-a", T0.getTime() + 330_000, 4]]);
+    expect(gauge(metrics.snapshot(), "swarm_os_instance_metrics_entries")).toBe(1);
+    clock.advance(3_600_000);
+    expect(store.latest()).toEqual({});
+    expect(gauge(metrics.snapshot(), "swarm_os_instance_metrics_entries")).toBe(0);
+  });
+
+  it("POST /api/instances/:id/metrics takes a snapshot from its own instance, also after its exit", async () => {
+    const { h, row, instanceMetrics, routes, send } = await attachedRoutes();
+    expect(routes.find((r) => r.path === "/api/instances/:id/metrics")).toMatchObject({ method: "POST", auth: ["instance"] });
+    expect(await send("POST", "/api/instances/:id/metrics", { actor: { kind: "instance", instanceId: "inst-other" }, body: { snapshot: snap(1) } })).toMatchObject({ status: 403 });
+    expect(await send("POST", "/api/instances/:id/metrics", { body: { snapshot: { at: "soon" } } })).toMatchObject({ status: 400, body: { error: { code: "bad_request" } } });
+    expect(await send("POST", "/api/instances/:id/metrics", { body: { snapshot: snap(1) } })).toEqual({ status: 200, body: { ok: true } });
+    await h.dispatcher.onExit(row.id, { reason: "completed", code: 0 });
+    expect(await send("POST", "/api/instances/:id/metrics", { body: { snapshot: snap(2) } })).toEqual({ status: 200, body: { ok: true } });
+    expect(instanceMetrics.latest()[row.id]?.snapshot).toEqual(snap(2));
+  });
+
+  it("measures each forwarded event batch, the events the run dropped, and the sessions it opened", async () => {
+    const { metrics, send } = await attachedRoutes();
+    const at = "2026-10-25T09:00:01.000Z";
+    await send("POST", "/api/instances/:id/events", { body: { events: [{ event: "task:start", payload: {}, at }, { event: "os:events_dropped", payload: { count: 12 }, at }] } });
+    await send("POST", "/api/instances/:id/sessions", { body: { role: "worker", sessionId: "sess-w1" } });
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_os_instance_event_batch_events")).toMatchObject({ count: 1, sum: 2 });
+    expect(hist(s, "swarm_os_instance_event_batch_seconds", { outcome: "ok" })?.count).toBe(1);
+    expect(counter(s, "swarm_os_instance_events_dropped_total")).toBe(12);
+    expect(counter(s, "swarm_os_instance_sessions_total", { role: "worker" })).toBe(1);
+  });
+
+  it("mountDispatch keeps forwarded snapshots and appends an instance's last one when it ends", async () => {
+    const store = new MemoryOsStore();
+    const clock = new FakeClock(T0);
+    await store.boards.put(boardRow());
+    await store.registrations.put(registrationRow({ minCards: 1 }));
+    const fake = new FakeBoardClient("trello");
+    fake.setQueue("board-a", [boardCard(1)]);
+    const written: InstanceMetricsRecord[] = [];
+    const host: BrainHost = { hub: new FakeEventHub(), tokens: new FakeTokens(store), route: () => {}, addPeriodic: () => {}, dispatchGates: [] };
+    const mod = mountDispatch(host, { store, config: testConfig(), rooms: new FakeRoomOpener(store, clock), clock, log: silentLog, launcher: new FakeLauncher(), boards: { trello: fake },
+      metrics: testRegistry(OS_METRICS).metrics, writeMetricsRecord: (r) => written.push(r) });
+    await mod.poller.pollNow("board-a");
+    const [row] = await store.instances.find({ cardId: "card-1" });
+    mod.instanceMetrics.put(row.id, snap(1));
+    clock.advance(15_000);
+    mod.instanceMetrics.put(row.id, snap(2));
+    await mod.dispatcher.onExit(row.id, { reason: "completed", code: 0 });
+    expect(written.map((r) => r.snapshot.at)).toEqual([1, 2]);
+  });
+});
+```
+
+In `instance-routes.test.ts`, `mount.test.ts` and `brain-module.test.ts`, add `POST /api/instances/:id/metrics` to each route list after `POST /api/instances/:id/sessions` (with `instance` as its auth in the first), so eleven routes become twelve.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `pnpm --filter @mnmal-ai/swarm-metrics build && cd packages/os && npx vitest run tests/metrics/ingress-metrics.test.ts tests/metrics/dispatch-metrics.test.ts tests/metrics/instance-metrics.test.ts tests/dispatch/instance-routes.test.ts tests/dispatch/mount.test.ts`
+Expected: FAIL — cannot load `../../src/dispatch/instance-metrics.js`; `h.dispatcher.seen` is undefined; the route lists lack the metrics route; every `hist(...)` is `undefined`.
+
+- [ ] **Step 3: Implement**
+
+1. Append the block above to `OS_METRICS` and run `pnpm --filter @mnmal-ai/swarm-metrics build`.
+2. Ingress:
+   - `FetchStub`: `StubReply.headers` becomes the response's headers.
+   - `fetchJson`, given a `meter`, runs the request inside a `swarm_os_ingress_board_api_seconds` span `{ source, op }` and ends it with `statusClass(status)`, `timeout` or `network`; a 429, or a 403 whose `x-ratelimit-remaining` header is `"0"`, also increments `swarm_os_ingress_board_rate_limited_total { source, op }`. Error codes and messages are unchanged.
+   - `TrelloApiClient` passes `op: "lists"`, `"list_cards"` and `"card"`, and `GitHubApiClient` `"issues"` and `"issue"`, with their `metrics` (default `noopMetrics`).
+   - `Poller`: its `KeyedQueue` is `new KeyedQueue({ metrics, queue: "poller" })`. One poll runs inside a `swarm_os_ingress_poll_seconds` span `{ source: board?.kind ?? "unknown" }` ended `ok`, `no_registration`, the `BoardApiError`'s code (`no_credentials` included) or `error`. Right after `listQueue` resolves it calls `dispatcher.seen.see(card.ref, card.version, "poll", now)` for every listed card. A good poll observes `swarm_os_ingress_poll_listed_cards` (cards listed) and `swarm_os_ingress_poll_new_cards` (cards it emitted).
+   - Webhook routes: each POST increments `swarm_os_ingress_webhooks_total { source, outcome }` beside the counter it already moves (`accepted`, `rejected`, `malformed`, `unknown_board`; `no_credentials` for the missing client), takes `arrived = (deps.clock ?? systemClock).now()` first, and hands it to `ingestRefs`, which runs inside a `swarm_os_ingress_ingest_seconds` span `{ source }` (ended `error` when any `getCard` or `decide` failed) and calls `deps.see?.(card.ref, card.version, "webhook", arrived)` for each card `getCard` returns, before `decide`.
+3. Dispatch:
+   - `KeyedQueue`: `run` raises `swarm_os_dispatch_lock_tasks { queue, key: lockKind(key) }` at the call and lowers it when the task settles, and opens a `swarm_os_dispatch_lock_wait_seconds` span at the call, ended `ok` when the task starts. The `Dispatcher`'s is `new KeyedQueue({ metrics, queue: "dispatch" })`.
+   - `card-seen.ts`: one `Map` keyed `<cardKey>@<version>` in insertion order (the oldest deleted past `maxEntries`) and one keyed by instance id.
+   - `checks.ts`: `timedCheck` runs one check inside a `swarm_os_dispatch_check_seconds` span `{ check }`, ended `passed` or `failed` by the result, `error` when it throws. `runChain` wraps each check it runs with `ctx.metrics ?? noopMetrics`; `dispatchLocked` wraps its two re-checks the same way.
+   - `Dispatcher`: keeps `deps.metrics ?? noopMetrics` and builds `seen = new CardSeen({ clock })`; its `ChainContext` carries the metrics. The private helper that calls the `onDecision` listeners takes a `via` (`card` from `decideCard`, `reevaluation` from `reevaluateHolds`, `command` from `dispatch()` and `holdCard`) and increments `swarm_os_dispatch_decisions_total { outcome, check: <first failing check name, or "none">, via }`. Where a decision row is stored in `dispatchLocked` step 2 and `decideCard` step 6, `seen.firstDecision(ref, version)` decides whether to observe `swarm_os_dispatch_card_seen_to_decision_seconds { source, outcome }` (brain clock, seconds). `dispatchLocked` opens `swarm_os_dispatch_decision_to_start_seconds` after step 2 and ends it `started` or `spawn_failed`; after `launcher.start` resolves, when `seen.sighting(card.ref, card.version)` exists it observes `swarm_os_dispatch_card_seen_to_dispatch_seconds { source, by: decidedBy === "policy" ? "policy" : "command" }` and calls `seen.bindInstance(instanceId, card.ref, card.version)`. Its spawn-failure path observes `swarm_os_instance_lifetime_seconds { outcome: "spawn_failed" }`. `noteQueue` sets `swarm_os_dispatch_queue_cards { board }` to the listing's length; `reevaluateHolds`, when it re-ran the chain, sets `swarm_os_dispatch_held_cards { board }` to the entries still held after the re-run.
+   - Lifecycle (`Dispatcher` methods and `instances.ts`): `onAttach` observes `swarm_os_instance_launch_to_attach_seconds { launcher: launcher.kind }` (now minus `startedAt`) and, from `seen.takeInstance(id)`, `swarm_os_dispatch_card_seen_to_attach_seconds { source }`. `onHeartbeat` (not ended) observes `swarm_os_instance_heartbeat_interval_seconds` when `lastHeartbeatAt` was set, and increments `swarm_os_instance_recovered_total` where it posts `recovered`. `onExit`, after `exitState`, and the sweep's `gone` path observe `swarm_os_instance_lifetime_seconds { outcome: lifetimeOutcome(state, exitReason) }` (`exited` maps to its `exitReason`, `completed`, `nothing_to_do` or `stopped`; `failed` with `exitReason` `gone` to `gone`, with a `spawn_failed:` prefix to `spawn_failed`, otherwise `failed`; `paused` and `login_expired` to themselves). `sweep()` increments `swarm_os_instance_dead_total` with `unresponsive`, `gone` or `detached` beside each of those notices and `swarm_os_instance_stop_escalations_total` at step 3, then sets `swarm_os_instance_live { state }` for each of the three live states from `store.instances.find({ state })`.
+   - `RunControl`: increments `swarm_os_instance_control_total { action, outcome }`: `pause`, `stop_graceful` and `stop_immediate` with `stream` (published), `launcher` (a run that never attached) or `refused` (not live); `resume` and `retry` with `dispatched`, `failed` (a spawn failure) or `refused` (every other `ok: false`); `republish` with `stream` per row.
+   - `instance-metrics.ts`: `InstanceMetricsStore` keeps per instance `{ at, snapshot, appendedAt, appended, endedAt }`. `put` stores `{ at: clock.now().getTime(), snapshot }` and calls `write({ r: "instance", instanceId, at, snapshot })` when nothing was appended for that instance in the last `INSTANCE_RECORD_EVERY_MS`; `settle` marks it ended and writes its latest unless that one was already written. `latest()` (and `put`) drop entries ended at least `INSTANCE_ENDED_KEEP_MS` ago, and past `maxEntries` the entry with the oldest `at`; each change sets `swarm_os_instance_metrics_entries`. A throwing `write` is logged once by the caller's wiring and never reaches `put`. Appending every forward would put each run's full snapshot into the brain's day file every 15 s; every five minutes, and once at the end, keeps every run's final numbers well under the sink's daily cap.
+   - `instance-routes.ts`: `POST /api/instances/:id/metrics` (auth `["instance"]`): `403 forbidden` when `actor.instanceId !== params.id`, `404 not_found` for an unknown instance, `400 bad_request` when `MetricsForwardSchema` refuses the body; an ended instance is accepted (its last forward comes just before its exit), so this route has no `409`; `instanceMetrics.put(id, body.snapshot)` and `200 { ok: true }`. `postInstanceEvents` runs inside a `swarm_os_instance_event_batch_seconds` span, observes `swarm_os_instance_event_batch_events` and adds each `os:events_dropped` event's `payload.count` to `swarm_os_instance_events_dropped_total`. The sessions route increments `swarm_os_instance_sessions_total { role }`.
+4. Launcher and resources: `meteredLauncher` returns `{ kind: inner.kind, start, status, stop, resources }`, each call inside a `swarm_os_launcher_op_seconds` span `{ launcher: kind, op }` ended `ok` (or the `status` result) or `error` before rethrowing. `LocalLauncher` increments `swarm_os_launcher_child_exits_total` with `ok` (code 0), `error` (another code) or `signal` (killed by a signal) on each child's `exit`. `ResourceMonitor.sample()` sets the eight `swarm_os_launcher_*` gauges from the snapshot it got.
+5. `mount.ts`: `metrics = deps.metrics ?? noopMetrics`. `boards = deps.boards ?? createBoardClients(config, store, deps.fetch, metrics)`. Keep the raw launcher for step 5's `onChildExit` (`meteredLauncher` hides the `LocalLauncher` class), and give `meteredLauncher(raw, metrics)` to the `Dispatcher`, `RunControl`, `ResourceMonitor` and `DispatchModule.launcher`. Pass `metrics` to the `Dispatcher`, `Poller`, `RunControl`, `ResourceMonitor`, the webhook deps (with `clock` and `see: (ref, version, source, at) => dispatcher.seen.see(ref, version, source, at)`) and the instance-route deps, with `instanceMetrics = new InstanceMetricsStore({ clock, write: deps.writeMetricsRecord, metrics })`. In step 4's `onChange`, an instance change with an ended state also calls `instanceMetrics.settle(row.id)`. The module exposes `instanceMetrics`.
+6. `brain-module.ts`: `mountDispatch(host, { …, metrics: ctx.metrics, writeMetricsRecord: (record) => ctx.metricsSink.write(record) })`, then `ctx.services.instanceMetrics = module.instanceMetrics`, which plan 03's `GET /api/metrics` serves under `instances`.
+7. `tests/dispatch/harness.ts`: the `metrics` option, passed to the `Dispatcher` and to `restart()`'s.
+8. Append `CardSeen`, `InstanceMetricsStore`, `meteredLauncher`, `lifetimeOutcome` and the types `InstanceMetricsRecord`, `Sighting`, `SeenSource`, `BoardApiMeter` to the `// plan 04` block of `src/index.ts`.
+
+- [ ] **Step 4: Run the tests, the package gate and the workspace build**
+
+Run: `cd packages/os && npx vitest run tests/metrics tests/dispatch tests/ingress tests/launcher tests/resources`
+Expected: PASS, the three new files and every earlier test (with the route lists of twelve). Then the package gate, `pnpm -w build` (exit 0), and `cd packages/cli && npx vitest run` (the CLI suite stays green).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/metrics/src/catalogue/os.ts packages/os/src/ingress packages/os/src/dispatch packages/os/src/launcher packages/os/src/resources \
+  packages/os/src/testing/fetch-stub.ts packages/os/src/index.ts packages/os/tests/dispatch packages/os/tests/metrics
+git -c commit.gpgsign=false commit -m "feat(os): measure ingress, dispatch, the launcher and instances, and keep each instance's forwarded metrics"
 ```

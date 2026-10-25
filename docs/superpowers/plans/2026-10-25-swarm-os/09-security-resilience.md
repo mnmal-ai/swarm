@@ -54,6 +54,7 @@ Integration tests drive an in-process brain over plain HTTP and SSE through `tes
   - `pnpm --filter @mnmal-ai/swarm-os test` and `pnpm --filter @mnmal-ai/swarm-os build` after every task.
   - From Task 7 on, also `pnpm --filter @mnmal-ai/swarm-integration-tests test`.
   - The last task also runs `pnpm -w build`.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 13 records the rows.
 
 ## Review Focus
 
@@ -114,7 +115,7 @@ describe("command kinds are the overview's table", () => {
   it("has the operating and query sets", () => {
     expect([...OPERATING]).toEqual(["dispatch", "hold", "override min_cards", "pause board", "resume board", "pause run",
       "resume run", "retry run", "stop run", "answer", "say", "sync", "logs", "skill", "mcp", "substrate status", "doctor"]);
-    expect([...QUERY]).toEqual(["top", "rooms", "instances", "why", "help"]);
+    expect([...QUERY]).toEqual(["top", "rooms", "instances", "why", "help", "metrics"]);
     for (const name of OPERATING) expect(kindOf(name), name).toBe("operating");
     for (const name of QUERY) expect(kindOf(name), name).toBe("query");
   });
@@ -1780,7 +1781,365 @@ scripts/verify-anonymous.sh --generic-only && git commit -m "test(os): real-stac
 
 ---
 
-### Task 12: The first proof, run by a person on the host
+### Task 12: Metrics: the security controls measured, and the metrics prove they survive the kill tests
+
+**Files:**
+- Modify: `packages/os/src/security/tripwires.ts`, `packages/os/src/security/limits.ts`, `packages/os/src/security/gate.ts`, `packages/os/src/security/lockdown.ts`, `packages/os/src/security/enrolment.ts`, `packages/os/src/security/index.ts`, `packages/os/src/security/refusals.ts` (`OPERATING` gains `metrics`), `packages/os/src/security/contracts.test.ts`
+- Modify: the brain's composition root, the file Task 7 changed (two more construction lines, Step 6), and `packages/metrics/src/catalogue/os.ts` (the plan 09 slot)
+- Modify: `tests/integration/os-harness.ts`, `tests/integration/os-resilience.test.ts` (tests h, i and j), `tests/integration/os-limits-immutable.test.ts` (the `metrics` probe), `scripts/os-first-proof.sh` and `tests/integration/os-first-proof-script.test.ts` (the card-seen latencies), `tests/integration/metrics-coverage.test.ts` (plan 10's file: its Task 13 hands the `includeOs` flip to this plan's last task), and `tests/integration/package.json` plus `pnpm-lock.yaml` (`"@mnmal-ai/swarm-metrics": "workspace:*"`, only if absent)
+- Test: `packages/os/src/security/metrics.test.ts`, `tests/integration/os-metrics.test.ts`
+
+**Interfaces:**
+- Consumes:
+  - From plan 10: `Metrics`, `noopMetrics`, `MetricsSnapshot`, `MetricRecord`, `SnapRecord`, `CATALOGUE`, `OS_METRICS`, `readMetricsDir`, `aggregate`; `testRegistry`.
+  - From plan 03: `BrainMetrics` (`addCollector`, `flush`, `stop({ final })`, `snapshot`, `metrics`), `GET /api/metrics`, `POST /api/metrics/client`, the SSE `metrics` event and its `metrics_event` periodic.
+  - From plan 05: the `metrics` command, and `MessagingHost.metrics` and `metricsSource`.
+  - From plan 04: `POST /api/instances/:id/metrics` and its instance snapshots under `instances` (kept an hour after an instance ends, and written to the brain's day file at its end); `swarm_os_dispatch_card_seen_to_dispatch_seconds`, `swarm_os_dispatch_card_seen_to_attach_seconds` and `swarm_os_instance_dead_total { reason }`.
+  - From plan 02: `SubstrateOsStore` with its `metrics` option, `FakeSubstrateClient` (its `down` switch), `swarm_os_store_errors_total { op, kind, code }` and `swarm_os_store_snapshot_reads_total`; the test helpers `hist`, `counter` and `gauge` (`packages/os/tests/metrics/helpers.ts`).
+- Produces:
+```ts
+// packages/os/src/security/tripwires.ts
+export class Tripwires {
+  constructor(deps: { store: OsStore; clock: Clock; messaging?: Messaging; metrics?: Metrics });
+  coolingCount(): number;            // sessions this process knows to be cooling now, from memory: set when record starts a cool-down or cooling() reads one, dropped when it ends
+  seedCooling(): Promise<void>;      // one sessions.find({}) at start, for cool-downs from before a restart
+}
+// packages/os/src/security/limits.ts, gate.ts, lockdown.ts, enrolment.ts
+new ConfigLimitGate({ /* … */ metrics?: Metrics }); new SecurityGate({ /* … */ metrics?: Metrics });
+new GuardedLockdown(inner, { /* … */ metrics?: Metrics }); new Enrolments({ /* … */ metrics?: Metrics });
+// packages/os/src/security/index.ts
+export interface SecurityDeps { /* … */ metrics?: Metrics }       // createSecurity hands it to every class above
+export interface Security { /* … */ refreshGauges(): void }       // sets the two gauges from memory, no store read; restore() also runs tripwires.seedCooling()
+// packages/os/src/security/refusals.ts
+export const OPERATING: readonly string[];                         // the overview's operating list, then "metrics" (plan 05's Task 15)
+// tests/integration/os-harness.ts
+export interface TestBrainOptions { /* … */ substrate?: boolean }   // the base store is a SubstrateOsStore over a FakeSubstrateClient, measured by the brain's registry
+export interface TestBrain { /* … */ metricsDir: string; flushMetrics(): Promise<void>; metricsSnapshot(): MetricsSnapshot; substrate: FakeSubstrateClient | null }
+```
+
+Catalogue rows this task adds (`actor` is the actor's kind; `via` is `command` when the refusal came through `checkCommand`, the dispatch checks it runs included, and `dispatch` when through `checkDispatch` itself; `check` is the `SecurityGate` step that decided: `lockdown`, `who`, `cooldown`, `provenance`, `host_only`, `burst`, `limits`, or `pass`):
+
+| Name | Kind | Unit | Labels | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_security_tripwires_total` | counter | count | `event` (a `TripwireEvent`) | `Tripwires.record`, every event row it writes |
+| `swarm_os_security_cooldowns_total` | counter | count | `event` | `Tripwires.record`, each cool-down it starts (never for one already running) |
+| `swarm_os_security_cooldowns_active` | gauge | count | | `Security.refreshGauges`, from `tripwires.coolingCount()` |
+| `swarm_os_security_lockdown_active` | gauge | count | | `GuardedLockdown` on each change, and `Security.refreshGauges` from `lockdown.active()` (1 or 0) |
+| `swarm_os_security_lockdowns_total` | counter | count | `actor`, `change` (`engaged`, `released`, `restored`, `refused`) | `GuardedLockdown.engage`, `release` and `restore` |
+| `swarm_os_security_limit_refusals_total` | counter | count | `limit` (the refusal's `data.limit`, `burst` included), `via` | `ConfigLimitGate.checkCommand` and `checkDispatch`; `SecurityGate` for `burst` |
+| `swarm_os_security_gate_seconds` | histogram | seconds | `gate` (`command`, `dispatch`), `check`, `outcome` (`ok` or the refusal code) | `SecurityGate.checkCommand` and `checkDispatch` |
+| `swarm_os_security_provenance_mismatches_total` | counter | count | `mismatch` (`session`, `device`, `address`, `revoked`) | `SecurityGate` step 4, one per kind in the verdict |
+| `swarm_os_security_enrolments_total` | counter | count | `step` (`request`, `approve`, `revoke`), `outcome` (`ok` or the refusal code) | `Enrolments.request`, `approve` and `revoke` |
+| `swarm_os_security_limit_reloads_total` | counter | count | `outcome` (`changed`, `unchanged`, `failed`) | `Security.reloadLimits` |
+
+```ts
+  // plan 09
+  { name: "swarm_os_security_tripwires_total", kind: "counter", unit: "count", help: "Tripwire events recorded, by event", labels: ["event"] },
+  { name: "swarm_os_security_cooldowns_total", kind: "counter", unit: "count", help: "Session cool-downs started, by the event that started them", labels: ["event"] },
+  { name: "swarm_os_security_cooldowns_active", kind: "gauge", unit: "count", help: "Sessions cooling down now", labels: [] },
+  { name: "swarm_os_security_lockdown_active", kind: "gauge", unit: "count", help: "1 while the brain is in lockdown, else 0", labels: [] },
+  { name: "swarm_os_security_lockdowns_total", kind: "counter", unit: "count", help: "Lockdown changes and refused attempts, by actor kind", labels: ["actor", "change"] },
+  { name: "swarm_os_security_limit_refusals_total", kind: "counter", unit: "count", help: "Refusals by a machine limit, for a command or a dispatch", labels: ["limit", "via"] },
+  { name: "swarm_os_security_gate_seconds", kind: "histogram", unit: "seconds", help: "Security gate time, by the check that decided and its outcome", labels: ["gate", "check", "outcome"] },
+  { name: "swarm_os_security_provenance_mismatches_total", kind: "counter", unit: "count", help: "Provenance mismatches found, by kind", labels: ["mismatch"] },
+  { name: "swarm_os_security_enrolments_total", kind: "counter", unit: "count", help: "Device enrolment steps, by outcome", labels: ["step", "outcome"] },
+  { name: "swarm_os_security_limit_reloads_total", kind: "counter", unit: "count", help: "Limits reloads from os.json, by outcome", labels: ["outcome"] },
+```
+
+Names this task reads from other plans' blocks of `os.ts`: plan 02's `swarm_os_store_errors_total` (labels `op`, `kind`, `code`; `code: "unreachable"` for a store that does not answer) and `swarm_os_store_snapshot_reads_total`, and plan 04's `swarm_os_instance_dead_total` (label `reason`: `unresponsive`, `gone`, `detached`), `swarm_os_dispatch_card_seen_to_dispatch_seconds` (labels `source`, `by`) and `swarm_os_dispatch_card_seen_to_attach_seconds` (label `source`).
+
+- [ ] **Step 1: Write the failing unit tests**
+
+`packages/os/src/security/metrics.test.ts`. The fixture, fresh per test:
+- `store = new MemoryOsStore()`, `clock = new FakeClock()`, and `messaging` over `FakeEventHub` and `FakePush`, as Task 3's tests build it, with the system room `room-sys`.
+- Device rows `dev-phone` (`phone`) and `dev-laptop` (`laptop`, a confirmer), and sessions `sess-a` (`owner`, `dev-phone`) and `sess-b` (`owner`, `dev-laptop`), both at `192.0.2.10` and expiring in 24 h; `owner(sess, address?)` as in Task 3; `phone = owner("sess-a")`, `laptop = owner("sess-b")`.
+- `LIMITS = { max_instances: 2, tokens_per_hour: 1000, tokens_per_day: 5000, dispatches_per_hour: 3, registrable_roots: ["/path/to/projects"], launcher_hosts: ["local"] }`; `config = makeConfig({ limits: LIMITS })`; `onDisk = JSON.parse(JSON.stringify(config))`, written to `configPath` in a temp `osHome`, mode `0600`.
+- `inner` and `freshLockdown()` are plan 03 `Lockdown`s on two temp paths; `cmd(name, args)` as in Task 2; `check(actor, argv, extra?)` and `auditCommands(sessionId, argvs, minutesAgo)` as in Task 4; `req` and `ctx(actor)` as in Task 6.
+- `({ metrics: registry } = testRegistry(CATALOGUE))`, `s = () => registry.snapshot()`, `hist`, `counter` and `gauge` from `../../tests/metrics/helpers.js`, and `securityDeps = { store, messaging, lockdown: inner, config, configPath, osHome, clock, log: testLog(), reevaluateHolds: async () => {}, metrics: registry }`.
+
+```ts
+it("counts tripwires by event, and cool-downs only when one starts", async () => {
+  const tripwires = new Tripwires({ store, clock, messaging, metrics: registry });
+  await tripwires.record("new_address", owner("sess-a", "203.0.113.5"));
+  await tripwires.record("new_address", owner("sess-a", "203.0.113.5"));
+  await tripwires.record("stop_all", { kind: "cos" });
+  expect(["new_address", "stop_all"].map((event) => counter(s(), "swarm_os_security_tripwires_total", { event }))).toEqual([2, 1]);
+  expect([counter(s(), "swarm_os_security_cooldowns_total", { event: "new_address" }), tripwires.coolingCount()]).toEqual([1, 1]);
+  clock.advance(600_001);
+  expect(tripwires.coolingCount()).toBe(0);
+});
+it("refreshGauges reports the sessions cooling and the lockdown from memory, seeded once by restore", async () => {
+  await store.sessions.patch("sess-b", { cooldownUntil: new Date(clock.now().getTime() + 60_000).toISOString() });
+  const security = createSecurity(securityDeps);
+  await security.restore();
+  const find = vi.spyOn(store.sessions, "find");
+  security.refreshGauges();
+  expect([gauge(s(), "swarm_os_security_cooldowns_active"), gauge(s(), "swarm_os_security_lockdown_active")]).toEqual([1, 0]);
+  expect(find).not.toHaveBeenCalled();
+  find.mockRestore();
+  await security.lockdown.engage({ kind: "host" });
+  security.refreshGauges();
+  expect(gauge(s(), "swarm_os_security_lockdown_active")).toBe(1);
+});
+it("counts lockdowns by actor and change, refusals and restores included, and moves the gauge", async () => {
+  const deps = { store, messaging, clock, osHome, reevaluateHolds: async () => {}, metrics: registry };
+  const guarded = new GuardedLockdown(inner, deps);
+  await guarded.engage(phone).catch(() => {});
+  await guarded.engage({ kind: "host" });
+  expect(gauge(s(), "swarm_os_security_lockdown_active")).toBe(1);
+  await guarded.release({ kind: "host" });
+  expect(gauge(s(), "swarm_os_security_lockdown_active")).toBe(0);
+  await guarded.engage({ kind: "host" });
+  await new GuardedLockdown(freshLockdown(), deps).restore();
+  const n = (actor: string, change: string) => counter(s(), "swarm_os_security_lockdowns_total", { actor, change });
+  expect([n("human", "refused"), n("host", "engaged"), n("host", "released"), n("host", "restored")]).toEqual([1, 2, 1, 1]);
+});
+it("counts limit refusals by limit, and by whether a command or a dispatch asked", async () => {
+  for (const id of ["inst-1", "inst-2"]) await store.instances.put(makeRow("instances", { id, state: "running", startedAt: clock.now().toISOString() }));
+  const limits = new ConfigLimitGate({ store, config, clock, userHome: "/path/to/home", metrics: registry });
+  await limits.checkCommand(cmd("register", { swarmPath: "/", host: "local" }));
+  await limits.checkDispatch({});
+  await limits.checkCommand(cmd("dispatch", { board: "board-a", card: "1" }));
+  const n = (limit: string, via: string) => counter(s(), "swarm_os_security_limit_refusals_total", { limit, via });
+  expect([n("registrable_roots", "command"), n("max_instances", "dispatch"), n("max_instances", "command")]).toEqual([1, 1, 1]);
+});
+it("times the gate by the check that decided and its outcome, and counts provenance mismatches and bursts", async () => {
+  let engaged = false;
+  const tripwires = new Tripwires({ store, clock, messaging, metrics: registry });
+  const gate = new SecurityGate({ limits: new ConfigLimitGate({ store, config, clock, userHome: "/path/to/home", metrics: registry }), tripwires, lockdown: { active: () => engaged }, store, clock, metrics: registry });
+  await gate.checkCommand(check(phone, ["top"]));
+  await gate.checkCommand(check({ ...phone, address: "203.0.113.5" }, ["dispatch", "board-a", "1"]));
+  await auditCommands("sess-b", [["dispatch", "board-a", "1"], ["dispatch", "board-a", "2"], ["dispatch", "board-a", "3"]], [9, 5, 1]);
+  await gate.checkCommand(check(laptop, ["dispatch", "board-a", "4"]));
+  engaged = true;
+  await gate.checkCommand(check(phone, ["top"])); await gate.checkDispatch({});
+  const n = (labels: Record<string, string>) => hist(s(), "swarm_os_security_gate_seconds", labels)?.count;
+  expect([n({ gate: "command", check: "pass", outcome: "ok" }), n({ gate: "command", check: "provenance", outcome: "provenance_mismatch" }),
+    n({ gate: "command", check: "burst", outcome: "limit" }), n({ gate: "command", check: "lockdown", outcome: "lockdown" }),
+    n({ gate: "dispatch", check: "lockdown", outcome: "lockdown" })]).toEqual([1, 1, 1, 1, 1]);
+  expect([counter(s(), "swarm_os_security_provenance_mismatches_total", { mismatch: "address" }),
+    counter(s(), "swarm_os_security_limit_refusals_total", { limit: "burst", via: "command" })]).toEqual([1, 1]);
+  expect(JSON.stringify(s())).not.toContain("203.0.113.5");       // an address is never a label
+});
+it("counts enrolment steps by outcome", async () => {
+  const enrolments = new Enrolments({ store, messaging, config, clock, metrics: registry });
+  const e = await enrolments.request(req);
+  for (const n of [1, 2]) await enrolments.request({ ...req, credentialId: `cred-${n}` });
+  await enrolments.request({ ...req, credentialId: "cred-4" }).catch(() => {});
+  await enrolments.approve(ctx(laptop), e.id, { confirmer: false });
+  await enrolments.revoke(ctx(laptop), "dev-unknown");
+  const n = (step: string, outcome: string) => counter(s(), "swarm_os_security_enrolments_total", { step, outcome });
+  expect([n("request", "ok"), n("request", "limit"), n("approve", "ok"), n("revoke", "not_found")]).toEqual([3, 1, 1, 1]);
+});
+it("counts limits reloads as unchanged, changed or failed", async () => {
+  const security = createSecurity(securityDeps);
+  await security.reloadLimits();
+  writeFileSync(configPath, JSON.stringify({ ...onDisk, limits: { ...LIMITS, max_instances: 3 } }), { mode: 0o600 });
+  await security.reloadLimits();
+  writeFileSync(configPath, "{", { mode: 0o600 });
+  await security.reloadLimits();
+  expect(["unchanged", "changed", "failed"].map((outcome) => counter(s(), "swarm_os_security_limit_reloads_total", { outcome }))).toEqual([1, 1, 1]);
+});
+```
+`packages/os/src/security/contracts.test.ts`: the expected `OPERATING` list gains `"metrics"` after `"doctor"`.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd packages/os && npx vitest run src/security/metrics.test.ts src/security/contracts.test.ts`
+Expected: FAIL: the classes take no `metrics`, `refreshGauges`, `coolingCount` and `seedCooling` do not exist, and `OPERATING` lacks `metrics`.
+
+- [ ] **Step 3: Implement, recording each row where its table line says**
+
+- `tripwires.ts`: `deps.metrics ?? noopMetrics`; `record` counts the tripwire with every row it writes and the cool-down only when it starts one, and keeps `coolingUntil: Map<sessionId, ms>` (set on a start, set or deleted by `cooling()` from the row it reads). `coolingCount()` counts the entries later than `clock.now()` and deletes the rest.
+- `limits.ts`: one private check returns the verdict; the public `checkCommand` and `checkDispatch` count a refusal once, with `via` as above.
+- `gate.ts`: `checkCommand` and `checkDispatch` each run in a span of `swarm_os_security_gate_seconds` with `{ gate }`, ended with `{ check }` and the outcome; step 4 counts each mismatch kind; step 6 counts a `burst` refusal.
+- `lockdown.ts`: `engage` and `release` count `refused` (and throw as before) for any actor but the host, else `engaged` or `released`, and set the gauge; `restore` counts `restored` when it re-engages.
+- `enrolment.ts`: each of `request`, `approve` and `revoke` counts its outcome once, `ok` or the code it refuses with (a `request` refusal is counted before the `GateRefusedError` is thrown).
+- `index.ts`: `createSecurity` passes `deps.metrics` to every class it builds; `refreshGauges()` sets `swarm_os_security_cooldowns_active` from `tripwires.coolingCount()` and `swarm_os_security_lockdown_active` from `lockdown.active()`; `restore()` awaits `tripwires.seedCooling()` first; `reloadLimits` counts `failed` when the reload failed, `changed` when `changed` is non-empty, else `unchanged`.
+- `refusals.ts`: append `"metrics"` to `OPERATING`. Plan 05's Task 15 added the command to `COMMAND_KINDS` as operating; the overview's command table predates it.
+- Append the entries above in the plan 09 slot of `packages/metrics/src/catalogue/os.ts`. Metric names stay string literals at each call site.
+
+- [ ] **Step 4: Run the whole package**
+
+Run: `pnpm --filter @mnmal-ai/swarm-os test && pnpm --filter @mnmal-ai/swarm-os build`
+Expected: PASS, `metrics.test.ts` at `Tests  7 passed (7)`, Tasks 1 to 6's tests unchanged; the build exits 0.
+
+- [ ] **Step 5: Write the failing integration tests**
+
+`tests/integration/package.json`: run `grep -n swarm-metrics tests/integration/package.json`; when absent, add `"@mnmal-ai/swarm-metrics": "workspace:*"` to `dependencies` and run `pnpm install`.
+
+`tests/integration/os-harness.ts`:
+- `startTestBrain` hands the composition root `metrics: new BrainMetrics({ dir: join(home, "metrics"), retainDays: 14, clock, log, sampler: false })`, a new one on each `restart()` (a new boot on the same directory); the FakeClock names the day files.
+- With `substrate: true`, the base store is `new SubstrateOsStore(substrate, { metrics: brainMetrics.metrics })` over `substrate = new FakeSubstrateClient({ clock })`, exposed as `tb.substrate`; `restart()` keeps the client and builds a new `SubstrateOsStore` over it with the new registry's handle. Otherwise `tb.substrate` is `null`.
+- `metricsDir` is `join(home, "metrics")`; `flushMetrics()` is that `BrainMetrics`'s `flush()`; `metricsSnapshot()` its `snapshot()`.
+- `crash()` also calls `stop({ final: false })` on it, so no shutdown snapshot is written, as a killed process writes none.
+- `tick()` also runs the brain's `metrics_event` periodic once, after the hub keepalive, so the metrics collectors and the SSE `metrics` event run on the harness's clock.
+
+`tests/integration/os-limits-immutable.test.ts`: the operating probes gain `["metrics"]`, so `PROBE_NAMES` holds 25 names and "covers every registered command" still holds.
+
+`tests/integration/metrics-coverage.test.ts`: `includeOs = true`, so every row in `OS_METRICS`, plans 02 to 09, must appear as a string literal in a `.ts` file under `packages/*/src/`.
+
+`tests/integration/os-metrics.test.ts` (each test on `startTestBrain()`, stopped after it; `laptop = await humanSession(tb, { deviceName: "laptop", address: "::ffff:127.0.0.1", confirmer: true })`; `sumCounter(s, name, labels?)` sums the counters of that name whose labels include `labels`):
+```ts
+it("serves GET /api/metrics to the host and a human with what the brain recorded, and to nobody else", async () => {
+  expect((await postCommand(tb, { bearer: laptop.token }, ["top"])).status).toBe(200);
+  for (const auth of [{ bearer: tb.host.bearer }, { bearer: laptop.token }]) {
+    const r = await api(tb, "/api/metrics?names=swarm_os_command_", { auth });
+    expect(r.status).toBe(200);
+    expect(r.body.brain.histograms).toEqual(expect.arrayContaining([expect.objectContaining({ name: "swarm_os_command_seconds", labels: expect.objectContaining({ command: "top", outcome: "ok" }) })]));
+    expect(r.body.brain.histograms.every((x: { name: string }) => x.name.startsWith("swarm_os_command_"))).toBe(true);
+  }
+  expect((await api(tb, "/api/metrics")).status).toBe(401);
+});
+it("sends the metrics event to the host's stream on the brain's tick, without an id of its own, and never replays it", async () => {
+  const host = await openStream(tb, "/api/stream?rooms=all", { bearer: tb.host.bearer });
+  await until(() => host.events.length > 0);
+  const lastId = host.lastEventId();
+  await tick(tb, 5_000);
+  await until(() => host.events.some((e) => e.type === "metrics"));
+  const i = host.events.findIndex((e) => e.type === "metrics");
+  expect(host.events[i].data).toMatchObject({ top: expect.any(Array), process: expect.any(Array), instances: expect.any(Array) });
+  expect(host.events[i].id).toBe(host.events[i - 1].id);
+  host.close();
+  const again = await openStream(tb, "/api/stream?rooms=all", { bearer: tb.host.bearer }, { lastEventId: lastId ?? 0 });
+  await until(() => again.events.length > 0);
+  expect(again.events.map((e) => e.type)).not.toContain("metrics");
+});
+it("runs /metrics from a room and leaves the summary there", async () => {
+  await postCommand(tb, { bearer: laptop.token }, ["top"]);
+  const r = await postCommand(tb, { bearer: laptop.token }, ["metrics", "os_command"], { room: tb.rooms.system });
+  expect([r.status, r.body.ok, r.body.text.includes("swarm_os_command_seconds")]).toEqual([200, true, true]);
+  expect((await tb.memory.messages.find({ roomId: tb.rooms.system }, { orderBy: "seq" })).at(-1)).toMatchObject({ kind: "system", body: r.body.text });
+});
+it("counts a limits reload by outcome", async () => {
+  rewriteConfig(tb, { limits: { ...DEFAULT_LIMITS, max_instances: 3 } });
+  process.emit("SIGHUP", "SIGHUP");
+  await until(() => sumCounter(tb.metricsSnapshot(), "swarm_os_security_limit_reloads_total", { outcome: "changed" }) === 1);
+});
+it("records a client's timings sent to /api/metrics/client, as tui for a bearer", async () => {
+  const def = OS_METRICS.find((d) => d.name.startsWith("swarm_os_client_") && d.kind === "histogram" && d.labels.includes("client"))!;
+  const labels = Object.fromEntries(def.labels.filter((l) => l !== "client").map((l) => [l, "x"]));
+  const r = await api(tb, "/api/metrics/client", { method: "POST", auth: { bearer: laptop.token }, body: { records: [{ r: "obs", name: def.name, v: 0.5, t: 0, labels }] } });
+  expect([r.status, r.body]).toEqual([200, { accepted: 1 }]);
+  expect(tb.metricsSnapshot().histograms.find((x) => x.name === def.name && x.labels.client === "tui")?.count).toBe(1);
+});
+it("refreshes the lockdown gauge on the brain's tick", async () => {
+  await tb.security.lockdown.engage(tb.host.actor);
+  await tick(tb, 5_000);
+  expect(tb.metricsSnapshot().gauges.find((g) => g.name === "swarm_os_security_lockdown_active")?.value).toBe(1);
+});
+```
+`tests/integration/os-resilience.test.ts`, three tests added after (g), on the same `beforeEach` brain and fixture unless a test builds its own (`sumCounter` as in `os-metrics.test.ts`):
+```ts
+it("(h) keeps both boots' metrics in the day file across a crash, and aggregate sums the counters of both", async () => {
+  for (let i = 0; i < 2; i++) expect((await api(tb, "/api/me")).status).toBe(401);
+  await tb.flushMetrics();
+  await tb.crash();
+  const tb2 = await tb.restart();
+  for (let i = 0; i < 3; i++) expect((await api(tb2, "/api/me")).status).toBe(401);
+  await tb2.flushMetrics();
+  const records: MetricRecord[] = [];
+  for await (const r of readMetricsDir(tb2.metricsDir)) records.push(r);
+  expect(new Set(records.filter((r) => r.r === "snap").map((r) => (r as SnapRecord).boot)).size).toBe(2);
+  const day = await aggregate(records.filter((r) => r.r === "snap" || r.r === "obs" || r.r === "span"));
+  expect(sumCounter(day, "swarm_os_brain_boots_total")).toBe(2);
+  expect(sumCounter(day, "swarm_os_auth_refusals_total", { code: "unauthenticated", reason: "missing_credentials" })).toBe(5);
+});
+it("(i) counts unreachable store errors and snapshot reads while the store is down", async () => {
+  const tb = await startTestBrain({ substrate: true });
+  const { laptop } = await fixture(tb);
+  const errors = () => sumCounter(tb.metricsSnapshot(), "swarm_os_store_errors_total", { code: "unreachable" });
+  const reads = () => sumCounter(tb.metricsSnapshot(), "swarm_os_store_snapshot_reads_total");
+  const before = [errors(), reads()];
+  tb.substrate!.down = true;
+  expect((await api(tb, "/api/rooms", { auth: { bearer: laptop.token } })).status).toBe(200);    // served from the snapshot
+  await api(tb, `/api/rooms/${tb.rooms.system}/messages`, { method: "POST", auth: { bearer: laptop.token }, body: { kind: "text", body: "still there?" } });
+  expect(errors()).toBeGreaterThan(before[0]);
+  expect(reads()).toBeGreaterThan(before[1]);
+  await tb.stop();
+});
+it("(j) keeps serving a dead instance's last forwarded numbers, and counts its death by reason", async () => {
+  const { instance, token } = await runningInstance(tb, reg, "1");
+  const snapshot = { at: 1, defs: [], counters: [{ name: "swarm_run_tasks_total", labels: { outcome: "ok" }, value: 3 }], gauges: [], histograms: [] };
+  expect((await api(tb, `/api/instances/${instance.id}/metrics`, { method: "POST", auth: { bearer: token }, body: { snapshot } })).status).toBe(200);
+  await tick(tb, 91_000);
+  setLauncherStatus(tb, instance.id, "gone");
+  await tick(tb, 1_000);
+  expect((await tb.memory.instances.get(instance.id))?.state).toBe("failed");
+  expect((await api(tb, "/api/metrics", { auth: { bearer: tb.host.bearer } })).body.instances[instance.id].snapshot).toEqual(snapshot);
+  expect(sumCounter(tb.metricsSnapshot(), "swarm_os_instance_dead_total", { reason: "gone" })).toBe(1);
+  await tb.flushMetrics();
+  const lines: Array<{ r: string; instanceId?: string }> = [];
+  for await (const r of readMetricsDir(tb.metricsDir)) lines.push(r as never);
+  expect(lines.some((r) => r.r === "instance" && r.instanceId === instance.id)).toBe(true);
+});
+```
+
+Run: `cd tests/integration && npx vitest run os-metrics.test.ts os-resilience.test.ts os-limits-immutable.test.ts metrics-coverage.test.ts`
+Expected: FAIL in `os-metrics.test.ts` and `os-resilience.test.ts`: `metricsDir`, `flushMetrics`, `metricsSnapshot` and `substrate` are not on `TestBrain`, and nothing hands the security bundle a `metrics` yet. `os-limits-immutable.test.ts` and `metrics-coverage.test.ts` may already pass (Step 3 records this plan's rows); a coverage failure is Step 8's ledger case.
+
+- [ ] **Step 6: Wire it into the brain and the harness**
+
+In the composition root, change only construction lines, as Task 7 did, and record the change in the SDD ledger:
+1. `createSecurity({ …, metrics })` with the same handle the root gives plan 05's executor.
+2. Register `() => security.refreshGauges()` as a collector named `security` on the brain's `BrainMetrics`: `host.metricsSource.addCollector` where the root is plan 05's `mountMessaging`, or `ctx.brainMetrics.addCollector` where it holds the `BrainContext`.
+
+Then the harness changes above.
+
+- [ ] **Step 7: Print the card-seen latencies in the first proof**
+
+`scripts/os-first-proof.sh`: near the top, `SEEN_TO_DISPATCH="swarm_os_dispatch_card_seen_to_dispatch_seconds"` and `SEEN_TO_ATTACHED="swarm_os_dispatch_card_seen_to_attach_seconds"`, under the comment `# plan 04's names in packages/metrics/src/catalogue/os.ts`. A new function, `latencies`, prints one line per series of each name from `GET /api/metrics` (the series differ by plan 04's `source` and `by` labels; the brain's `process` label is left out), authenticated as the host. `OS_DIR` and `BASE` stand for the script's own variables for the directory of the `os.json` it reads (where `host.secret` sits beside it) and the loopback base URL it builds from `bind`; use its names if they differ. The header goes through a process substitution, so the secret is never an argument and never printed.
+```bash
+latencies() {
+  local pair name label json
+  for pair in "$SEEN_TO_DISPATCH|card seen → dispatch" "$SEEN_TO_ATTACHED|card seen → instance attached"; do
+    name="${pair%%|*}"; label="${pair#*|}"
+    if ! json="$(curl -fsS --max-time 10 -H @<(printf 'Authorization: Bearer host_%s\n' "$(<"$OS_DIR/host.secret")") "$BASE/api/metrics?names=$name")"; then
+      echo "$label: the brain did not answer"; continue
+    fi
+    jq -r --arg n "$name" --arg l "$label" '
+      [.brain.histograms[]? | select(.name == $n)]
+      | if length == 0 then "\($l): no samples yet"
+        else .[] | (.labels | del(.process) | to_entries | map("\(.key)=\(.value)") | join(", ")) as $ls
+          | "\($l)\(if $ls == "" then "" else " (\($ls))" end): p50 \(.p50) s, max \(.max) s over \(.count) cards" end' <<<"$json"
+  done
+}
+```
+It runs after the person confirms Step 3, and again in `summary` before the `PASS`/`FAIL` lines. `register_cmd` and `register_argv_json` stay the only functions that know plan 08's syntax.
+
+`tests/integration/os-first-proof-script.test.ts`:
+- `SECRET` is built at run time (`"h".repeat(43)`) and passed to the stubs as `STUB_HOST_SECRET`; the `swarm` stub's `os init` also writes `$HOME/.swarm/host.secret`, mode 600, holding it.
+- The `curl` stub appends the lines of the file named by an `-H @<file>` argument to `curl.log`, and answers `/api/metrics?names=<n>` with `{"brain":{"histograms":[{"name":"<n>","labels":<labels>,"count":2,"p50":<p50>,"max":<max>}]},"instances":{}}`: when `<n>` contains `attach`, labels `{"process":"brain","source":"webhook"}`, p50 6 and max 9; else labels `{"process":"brain","source":"poll","by":"policy"}`, p50 2.5 and max 4.
+- One test added:
+```ts
+it.skipIf(!hasJq)("prints the card-seen latencies from GET /api/metrics with the host's bearer, and never prints the secret", () => {
+  const r = run(ANSWERS);
+  expect(r.stdout).toContain("card seen → dispatch (source=poll, by=policy): p50 2.5 s, max 4 s over 2 cards");
+  expect(r.stdout).toContain("card seen → instance attached (source=webhook): p50 6 s, max 9 s over 2 cards");
+  expect(read("curl.log")).toContain(`Authorization: Bearer host_${SECRET}`);
+  expect(r.stdout + r.stderr).not.toContain(SECRET);
+});
+```
+
+- [ ] **Step 8: Run everything**
+
+Run: `pnpm -w build && pnpm --filter @mnmal-ai/swarm-os test && pnpm --filter @mnmal-ai/swarm-metrics test && env -u ANTHROPIC_API_KEY pnpm --filter @mnmal-ai/swarm-integration-tests test && scripts/verify-anonymous.sh --generic-only`
+Expected: the build exits 0; every suite passes with `os-e2e` skipped: `os-metrics.test.ts` at 6 passed, `os-resilience.test.ts` at 12, `os-first-proof-script.test.ts` at 7 (or 4 passed and 3 skipped where `jq` is absent), and `metrics-coverage.test.ts` with `includeOs` on. A coverage failure names an OS row that no file records: that is the owning plan's defect, written into the SDD ledger and handed back (Global Constraints), never fixed by deleting the row here.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add packages/os/src/security packages/metrics/src/catalogue/os.ts <the composition root's path, found as in Task 7> tests/integration/os-harness.ts tests/integration/os-metrics.test.ts tests/integration/os-resilience.test.ts tests/integration/os-limits-immutable.test.ts tests/integration/os-first-proof-script.test.ts tests/integration/metrics-coverage.test.ts tests/integration/package.json pnpm-lock.yaml scripts/os-first-proof.sh
+scripts/verify-anonymous.sh --generic-only && git -c commit.gpgsign=false commit -m "feat(os): measure the security controls, and prove the metrics survive the kill tests"
+```
+
+- [ ] **Step 10: Tell the owner**
+
+Tell the owner, when the first proof (Task 13) is handed over, that it also prints the `card seen → dispatch` and `card seen → instance attached` p50 and max, after Step 3 and in its summary, and that `GET /api/metrics`, `swarm os metrics` and the `metrics` chat command show the rest.
+
+---
+
+### Task 13: The first proof, run by a person on the host
 
 **Files:**
 - Create: `scripts/os-first-proof.sh` (mode `0755`)

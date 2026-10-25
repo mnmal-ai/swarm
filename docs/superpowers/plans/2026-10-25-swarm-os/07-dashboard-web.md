@@ -25,6 +25,7 @@
 - **No new GitHub workflows and no trigger changes** (overview, verbatim). os-web joins the existing `turbo build`/`test:ci` by being a workspace package.
 - os-web imports are extensionless (`moduleResolution: "Bundler"`); `packages/os` keeps `.js` suffixes.
 - Every task ends with `pnpm -w build` green and the touched package's tests green.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 13 records the rows.
 
 ## Review Focus
 
@@ -1975,4 +1976,448 @@ Expected: the five greps print nothing, and every anonymity group reports `0 hit
 git add packages/os/scripts packages/os/src/api/web-embed.ts packages/os/src/api/static.ts packages/os/src/index.ts packages/os/package.json packages/os/tests .gitignore pnpm-lock.yaml
 git add -u packages/os/src    # the composition-root call in plan 03's file
 git commit -m "feat(os): embed the dashboard in the brain and serve it with a strict CSP"
+```
+
+---
+
+### Task 13: Metrics: the dashboard's own timings and the Performance view
+
+**Files:**
+- Create: `packages/os-web/src/metrics/names.ts`, `packages/os-web/src/metrics/recorder.ts`, `packages/os-web/src/metrics/browser.ts`, `packages/os-web/src/metrics/perf-model.ts`, `packages/os-web/src/components/Performance.tsx`
+- Modify: `packages/os-web/package.json` (devDependency `"@mnmal-ai/swarm-metrics": "workspace:*"`: os-web imports only its types, so the browser bundle gains no code and no node module), `pnpm-lock.yaml`
+- Modify: `packages/os-web/src/types.ts`, `src/api.ts`, `src/stream.ts`, `src/store.ts`, `src/client.ts`, `src/App.tsx`, `src/components/Layout.tsx`, `src/app.css` (`.perf`, `.perf-table`, `.perf-grid`)
+- Modify: `packages/os-web/tests/fakes.ts` (`fakeApi` gains `metrics` and `postClientMetrics`; the fixtures `hist`, `snap`, `brainMetrics` and `metricsEvent`), `packages/os-web/tests/render.tsx` (the test `Client` gains a `recorder`)
+- Modify: `packages/metrics/src/catalogue/os.ts` (under its `// plan 07` line only, append-only)
+- Test: `packages/os-web/tests/metrics-recorder.test.ts`, `packages/os-web/tests/metrics-timings.test.ts`, `packages/os-web/tests/performance.test.tsx`
+
+**Interfaces:**
+- Consumes:
+  - Plan 03's routes and event, as given. `GET /api/metrics?since&names&format=json` (human session or host) answers `{ brain: MetricsSnapshot; instances: Record<instanceId, { at; snapshot }> }`. `POST /api/metrics/client { records: ObsRecord[] }` takes a human session, at most 500 records, and names starting `swarm_os_client_`; the brain records them with `client: "web"` added, so the dashboard never sends a `client` label. The SSE `metrics` event comes every 5 s as `{ at, top: SinkRow[] (10), process: GaugeSnapshot[], instances: Array<{ instanceId, top: SinkRow[] (3) }> }`, without an `id:` line and never replayed.
+  - Types only (`import type`) from `@mnmal-ai/swarm-metrics`: `Labels`, `MetricsSnapshot`, `HistogramSnapshot`, `GaugeSnapshot`, `CounterSnapshot`, `SinkRow`, `ObsRecord`. Tests may import `OS_METRICS` at run time.
+  - Other plans' rows, read by name only through `PERF_NAMES` below: plan 03's HTTP request seconds, plan 02's store operation seconds, plan 04's three card-seen latencies, plan 10's `swarm_run_phase_seconds` (label `phase`), `swarm_agent_tokens_total` (labels `role` and `kind`; this view reads kinds `input` and `output`) and the `swarm_process_*` rows of plan 10's Task 4.
+  - Tasks 2 to 4, 8 and 10.
+  - What this task does not time again: plan 03's HTTP rows time the brain's side of every call, and its module-start row for module `web` times loading the embedded files. The service worker runs in its own context with no recorder; plan 05 times push sends.
+- Produces:
+
+```ts
+// src/types.ts (added)
+export interface BrainMetrics { brain: MetricsSnapshot; instances: Record<string, { at: number; snapshot: MetricsSnapshot }> }
+export interface MetricsEvent { type: "metrics"; at: number; top: SinkRow[]; process: GaugeSnapshot[]; instances: Array<{ instanceId: string; top: SinkRow[] }> }
+// BrainEvent gains MetricsEvent; STREAM_EVENT_TYPES gains "metrics"
+// src/metrics/names.ts
+export const CLIENT_METRICS: {
+  readonly api: "swarm_os_client_api_seconds"; readonly streamConnect: "swarm_os_client_stream_connect_seconds";
+  readonly eventRender: "swarm_os_client_event_render_seconds"; readonly refill: "swarm_os_client_refill_seconds";
+  readonly pageLoad: "swarm_os_client_page_load_seconds"; readonly longTask: "swarm_os_client_long_task_seconds";
+};
+export type ClientMetricName = (typeof CLIENT_METRICS)[keyof typeof CLIENT_METRICS];
+export interface ClientMeter { observe(name: ClientMetricName, seconds: number, labels?: Labels): void }
+export const PERF_NAMES: {
+  readonly http: "swarm_os_http_request_seconds";
+  readonly store: "swarm_os_store_op_seconds";
+  readonly cardSeen: readonly [
+    { readonly name: "swarm_os_dispatch_card_seen_to_decision_seconds"; readonly label: "decision" },
+    { readonly name: "swarm_os_dispatch_card_seen_to_dispatch_seconds"; readonly label: "dispatch" },
+    { readonly name: "swarm_os_dispatch_card_seen_to_attach_seconds"; readonly label: "instance attached" },
+  ];
+  readonly runPhase: "swarm_run_phase_seconds";
+  readonly agentTokens: "swarm_agent_tokens_total";
+};
+// src/metrics/recorder.ts
+export const CLIENT_FLUSH_MS = 30_000;
+export const CLIENT_BATCH_MAX = 500;
+export const CLIENT_BUFFER_MAX = 2_000;
+export const CLIENT_STATS_RESERVOIR = 256;
+export interface ClientSeriesStats { name: ClientMetricName; labels: Labels; count: number; sum: number; p50: number; p99: number; max: number }
+export interface ClientRecorderDeps { post(records: ObsRecord[], opts: { keepalive?: boolean } | undefined): Promise<void>; epochMs?: () => number }   // epochMs default Date.now
+export class ClientRecorder implements ClientMeter {
+  constructor(deps: ClientRecorderDeps);
+  observe(name: ClientMetricName, seconds: number, labels?: Labels): void;   // buffers { r: "obs", name, v: seconds, t: epochMs(), labels }; past CLIENT_BUFFER_MAX drops the oldest and counts it
+  flush(opts?: { keepalive?: boolean }): Promise<void>;                     // posts batches of at most CLIENT_BATCH_MAX, oldest first; never rejects
+  start(): void;                                                            // flush every CLIENT_FLUSH_MS
+  stop(): Promise<void>;                                                    // clears the timer, then flush({ keepalive: true })
+  stats(): ClientSeriesStats[];                                             // this page's own numbers, in first-seen order
+  readonly pending: number;
+  readonly dropped: number;
+}
+// src/metrics/browser.ts
+export function afterPaint(fn: () => void): void;                          // requestAnimationFrame then setTimeout 0; setTimeout 0 alone where there is no requestAnimationFrame
+export function pageClock(): number;                                       // performance.now(): milliseconds since navigation start
+export function recordPageLoad(meter: ClientMeter, nav: PerformanceNavigationTiming | undefined): void;
+export function observePageLoad(meter: ClientMeter): void;                 // once per page, after "load": recordPageLoad(meter, performance.getEntriesByType("navigation")[0])
+export function markFirstHello(meter: ClientMeter, msSinceNavigation: number): void;   // once per page
+export function resetPageMarks(): void;                                    // for tests
+export function observeLongTasks(meter: ClientMeter, Observer?: typeof PerformanceObserver): () => void;   // a no-op stop where "longtask" is unsupported
+// src/metrics/perf-model.ts
+export interface LatencyRow { key: string; count: number; p50: number; p99: number; total: number }
+export function latencyRows(snapshot: MetricsSnapshot | null, names: readonly string[], opts?: { max?: number; prefix?: (name: string) => string }): LatencyRow[];
+export function rankSinks(snapshot: MetricsSnapshot, n: number): SinkRow[];
+export function sinkLabel(row: { name: string; labels: Labels }): string;
+export function phaseSplit(snapshot: MetricsSnapshot): Array<{ phase: string; seconds: number; share: number }>;
+export function tokensByRole(snapshot: MetricsSnapshot): Array<{ role: string; input: number; output: number }>;
+export interface ProcessView { loop: { p50: number | null; p99: number | null; max: number | null }; heapUsed: number | null; rss: number | null; systemFree: number | null; load1: number | null; cpuUser: number | null; cpuSystem: number | null; diskFree: number[] }
+export function processView(gauges: readonly GaugeSnapshot[], counters?: readonly CounterSnapshot[]): ProcessView;
+export function formatSeconds(seconds: number): string;   // plan 10's formatDuration rules: "0.4 ms", "12 ms", "3.2 s", "4m 05s", "1h 12m"
+export function formatBytes(bytes: number): string;       // "512 B", "12.0 KB", "1.2 MB", "3.4 GB" (powers of 1024)
+// src/api.ts (added)
+export interface ApiDeps { fetch: typeof fetch; onUnauthorized: () => void; onCooldown: (cooldownUntil: string) => void; onLockdown: () => void; base?: string; meter?: ClientMeter; now?: () => number }   // now: monotonic ms, default performance.now()
+// Api gains:
+//   metrics(opts?: { since?: number; names?: string[] }): Promise<BrainMetrics>;              GET /api/metrics?format=json[&since=<epoch ms>][&names=<a,b>]
+//   postClientMetrics(records: ObsRecord[], opts?: { keepalive?: boolean }): Promise<void>;    POST /api/metrics/client { records }; never timed itself
+// src/stream.ts: BrainStreamDeps gains meter?: ClientMeter and now?: () => number
+// src/store.ts: State gains metrics: MetricsEvent | null; createStore's deps gain meter?: ClientMeter and now?: () => number
+// src/client.ts
+export interface ClientDeps { fetch: typeof fetch; EventSourceImpl: typeof EventSource; onUnauthorized: () => void; recorder?: ClientRecorder; now?: () => number; afterPaint?: (fn: () => void) => void }
+export interface Client { api: Api; store: Store; stream: BrainStreamLike; recorder: ClientRecorder }
+// src/components/Performance.tsx
+export function Performance(): JSX.Element;
+// tests/fakes.ts
+export function hist(name: string, labels: Labels, v: { count: number; sum: number; p50: number; p99: number }): HistogramSnapshot;   // unit "seconds", min p50, p90 and max p99, buckets []
+export function snap(over?: Partial<MetricsSnapshot>): MetricsSnapshot;      // at 0, every list empty
+export function brainMetrics(over?: Partial<BrainMetrics>): BrainMetrics;
+export function metricsEvent(over?: Partial<MetricsEvent>): MetricsEvent;    // at 0, top [], process [], instances []
+```
+
+`brainMetrics()` holds, in `brain`:
+- `defs`: `swarm_os_http_request_seconds` with labels `["route", "method", "status"]`, and `swarm_os_store_op_seconds` with `["op", "kind", "outcome"]`.
+- histograms (count, sum, p50, p99):
+  - HTTP `/api/rooms GET 2xx`: 120, 2.4, 0.012, 0.04
+  - HTTP `/api/commands POST 4xx`: 3, 0.6, 0.15, 0.3
+  - store `find message ok`: 300, 0.9, 0.002, 0.01
+  - the three card-seen rows, with no labels: decision 1, 0.8, 0.8, 0.8; dispatch 1, 4, 4, 4; attached 1, 9.5, 9.5, 9.5
+- gauges:
+  - `swarm_process_event_loop_delay_seconds`: `p50` 0.0004, `p99` 0.008, `max` 0.04
+  - `swarm_process_heap_used_bytes` 125829120
+  - `swarm_process_rss_bytes` 314572800
+  - `swarm_process_system_free_bytes` 6442450944
+  - `swarm_process_load_average` 1.2
+  - `swarm_process_disk_free_bytes` `{ disk: "0" }` 120259084288
+- counters: `swarm_process_cpu_seconds_total`, `user` 12 and `system` 3.
+
+`instances` is `{}`.
+
+The rows (area `os_client`). They are all histograms, because the route takes `ObsRecord`s. The TUI (plan 08) records the first three as client `tui`, so they are declared once, here:
+
+| Name | Kind | Unit | Labels | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_client_api_seconds` | histogram | seconds | `client`, `route` (the overview's route pattern), `method`, `status` (`2xx`, `3xx`, `4xx`, `5xx`, `network`) | `createApi`'s request helper: every call but `postClientMetrics`, from before `fetch` to the body read |
+| `swarm_os_client_stream_connect_seconds` | histogram | seconds | `client`, `kind` (`first`, `reconnect`) | `BrainStream`: `connect()`, a replacement `EventSource` or a dropped connection, to `onopen` |
+| `swarm_os_client_event_render_seconds` | histogram | seconds | `client`, `type` (a `STREAM_EVENT_TYPES` name) | `createClient`'s `onEvent`: receipt to the paint after `store.applyEvent` |
+| `swarm_os_client_refill_seconds` | histogram | seconds | `client` | `Store.refillRooms`, when it holds at least one room |
+| `swarm_os_client_page_load_seconds` | histogram | seconds | `client`, `phase` (`dns`, `connect`, `ttfb`, `response`, `dom_ready`, `load`, `first_hello`) | `recordPageLoad` (run by `observePageLoad` from `Connected`) and `markFirstHello` (from `createClient`'s `onEvent`) |
+| `swarm_os_client_long_task_seconds` | histogram | seconds | `client` | `observeLongTasks`, started by `Connected` |
+
+Appended to `OS_METRICS` in `packages/metrics/src/catalogue/os.ts`, under the `// plan 07` line:
+
+```ts
+  // The dashboard's own timings, posted to POST /api/metrics/client; the brain adds `client`.
+  // swarm top (plan 08) records the api, stream_connect and event_render rows as client "tui".
+  { name: "swarm_os_client_api_seconds", kind: "histogram", unit: "seconds", help: "A client's brain API call, from request to response read, by route pattern, method and status class", labels: ["client", "route", "method", "status"] },
+  { name: "swarm_os_client_stream_connect_seconds", kind: "histogram", unit: "seconds", help: "A client's event stream, from opening or the last drop to open", labels: ["client", "kind"] },
+  { name: "swarm_os_client_event_render_seconds", kind: "histogram", unit: "seconds", help: "A brain event, from its arrival at the client to the frame that shows it", labels: ["client", "type"] },
+  { name: "swarm_os_client_refill_seconds", kind: "histogram", unit: "seconds", help: "Refilling held rooms over REST after a gap or a replaced stream", labels: ["client"] },
+  { name: "swarm_os_client_page_load_seconds", kind: "histogram", unit: "seconds", help: "The dashboard's page load by navigation-timing phase, and navigation start to the first hello", labels: ["client", "phase"] },
+  { name: "swarm_os_client_long_task_seconds", kind: "histogram", unit: "seconds", help: "Main-thread tasks of 50 ms or more in the dashboard", labels: ["client"] },
+```
+
+**The Performance view.** The header gains a "Performance" button (`aria-pressed` while the view is open). It replaces `<main aria-label="Room">` with `<main aria-label="Performance">` holding `<Performance />`; picking any channel returns to the room. On mount, and on its "Refresh" button, `Performance` calls `api.metrics()` once and shows "as of <formatClock>" for the brain snapshot's `at`. After that it follows `State.metrics`, which the SSE `metrics` event replaces every 5 s. A failed load shows `role="alert"` "Metrics unavailable: <message>". It has four `<section>`s, named "Brain", "Instances", "Process" and "Client", each with an `<h3>` of that name:
+- **Brain.** A `<table aria-label="Top time sinks">` (Sink, Count, Total, p50, p99) from `State.metrics.top` when the store holds a metrics event, else `rankSinks(brain, 10)`. Then three `<table>`s with columns Series, p50, p99 and Count: "HTTP by route" (`latencyRows(brain, [PERF_NAMES.http])`), "Store by operation" (`[PERF_NAMES.store]`) and "Card seen to" (the three card-seen names, each row keyed by its `label`). An empty table body is one row, "Nothing recorded yet."
+- **Instances.** One `<article aria-label="Instance metrics <cardId>">` per instance in `LIVE_STATES` that has a snapshot in the fetched `instances` or a row in `State.metrics.instances`. Each has an `<h4>` (`rooms[roomId]?.name ?? "card <cardId>"`) and a `<dl>`:
+  - "Phases": `<phase> <formatSeconds> (<share as a whole percent>%)`, joined by ` · `.
+  - a `<table aria-label="Top time sinks">` of at most 3 rows, from the event's `top` for that instance, else `rankSinks(snapshot, 3)`.
+  - "Tokens": `<role> <formatTokens(input)> in / <formatTokens(output)> out`, joined by ` · `.
+
+  With none: "No live instance has reported metrics yet."
+- **Process.** A `<dl>` from `State.metrics.process`, else the fetched brain's gauges, with CPU from the fetched brain's counters. A missing value is "—".
+  - "Event-loop delay": `p50 <s> · p99 <s> · max <s>`
+  - "Memory": `heap <b> · rss <b> · system free <b>`
+  - "CPU": `load <x.xx> · user <s> · system <s>`
+  - "Free disk": each disk's `<b>`, joined by ` · `
+- **Client.** A `<table aria-label="This dashboard">` (Series, p50, p99, Count) from `recorder.stats()`. The series is the name without `swarm_os_client_` and `_seconds`, then each label as `k=v`, all joined by spaces. Empty, it reads "Nothing measured yet." When `recorder.dropped > 0`, it adds "<n> measurements were dropped before they reached the brain."
+
+`latencyRows` makes one row per histogram series of the given names. Its `key` is `prefix(name)` (default empty; the card-seen table passes each name's `label`) followed by the series' label values, in the order of the name's entry in `snapshot.defs` (sorted by label name when no def is there, as in an instance snapshot). The base labels `process`, `run_id` and `overflow` are left out, and the parts are joined by single spaces. `total` is the series' `sum`. Rows sort by `total`, largest first, at most `max` (default 8). `rankSinks` is plan 10's `topSinks` rule (duration histograms ranked by `sum`, ties by name, `meanSeconds = sum / count`, `share: null`, and plan 10's `CONTAINER_METRICS` left out: `swarm_run_seconds`, `swarm_run_phase_seconds`, `swarm_run_goal_seconds`, `swarm_run_task_seconds`, `swarm_agent_session_seconds`), restated because os-web takes types only from the library. A histogram is a duration when its name ends `_seconds`: forwarded instance snapshots arrive with `defs: []` (plan 04), so nothing here reads units from an instance snapshot's `defs`. `sinkLabel` is `name`, plus `{k=v,…}` over its non-base labels in their own order when there are any. `phaseSplit` sums `swarm_run_phase_seconds` by `phase`, largest first, with `share` of their total. `tokensByRole` sums `swarm_agent_tokens_total` by `role` for kinds `input` and `output`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// packages/os-web/tests/metrics-recorder.test.ts
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { ApiError } from "../src/api";
+import { CLIENT_METRICS } from "../src/metrics/names";
+import { CLIENT_BATCH_MAX, CLIENT_BUFFER_MAX, CLIENT_FLUSH_MS, ClientRecorder } from "../src/metrics/recorder";
+
+const API = CLIENT_METRICS.api;
+const L = { route: "/api/rooms", method: "GET", status: "2xx" };
+
+it("posts what it observed every 30 s as obs records, and nothing when there is nothing new", async () => {
+  vi.useFakeTimers();
+  const post = vi.fn(async () => {});
+  const r = new ClientRecorder({ post, epochMs: () => 1_761_393_600_000 });
+  r.start();
+  r.observe(API, 0.12, L);
+  await vi.advanceTimersByTimeAsync(CLIENT_FLUSH_MS);
+  expect(post.mock.calls[0]![0]).toEqual([{ r: "obs", name: API, v: 0.12, t: 1_761_393_600_000, labels: L }]);
+  await vi.advanceTimersByTimeAsync(CLIENT_FLUSH_MS);
+  expect(post).toHaveBeenCalledTimes(1);
+  await r.stop();
+});
+it("sends at most 500 records a request and holds at most 2,000", async () => {
+  const post = vi.fn(async () => {});
+  const r = new ClientRecorder({ post });
+  for (let i = 0; i < CLIENT_BUFFER_MAX + 100; i++) r.observe(API, 0.01, L);
+  expect([r.pending, r.dropped]).toEqual([CLIENT_BUFFER_MAX, 100]);
+  await r.flush();
+  expect(post.mock.calls.map(([records]) => records.length)).toEqual([CLIENT_BATCH_MAX, CLIENT_BATCH_MAX, CLIENT_BATCH_MAX, CLIENT_BATCH_MAX]);
+});
+it("keeps a batch the brain did not get, and drops one the brain refused", async () => {
+  const post = vi.fn().mockRejectedValueOnce(new ApiError(0, "network", "Failed to fetch")).mockRejectedValueOnce(new ApiError(400, "bad_request", "bad name")).mockResolvedValue(undefined);
+  const r = new ClientRecorder({ post });
+  r.observe(API, 0.1, L);
+  await r.flush();
+  expect(r.pending).toBe(1);
+  await r.flush();
+  expect([r.pending, r.dropped]).toEqual([0, 1]);
+});
+it("keeps its own count, sum, p50, p99 and max per series for the Performance view", () => {
+  const r = new ClientRecorder({ post: vi.fn(async () => {}) });
+  for (let i = 1; i <= 100; i++) r.observe(API, i / 1000, L);
+  expect(r.stats()).toEqual([{ name: API, labels: L, count: 100, sum: expect.closeTo(5.05, 9), p50: 0.05, p99: 0.099, max: 0.1 }]);
+});
+it("flushes with keepalive when it stops", async () => {
+  const post = vi.fn(async () => {});
+  const r = new ClientRecorder({ post });
+  r.observe(API, 0.1, L);
+  await r.stop();
+  expect(post).toHaveBeenCalledWith([expect.objectContaining({ name: API })], { keepalive: true });
+});
+it("records only names the brain declares, as seconds histograms with a client label", () => {
+  for (const name of Object.values(CLIENT_METRICS)) {
+    const def = OS_METRICS.find((d) => d.name === name);
+    expect(def, name).toMatchObject({ kind: "histogram", unit: "seconds" });
+    expect(def!.labels).toContain("client");
+  }
+});
+```
+
+```ts
+// packages/os-web/tests/metrics-timings.test.ts
+import { ApiError, createApi } from "../src/api";
+import { createClient } from "../src/client";
+import { CLIENT_METRICS } from "../src/metrics/names";
+import { markFirstHello, observeLongTasks, recordPageLoad, resetPageMarks } from "../src/metrics/browser";
+import { ClientRecorder } from "../src/metrics/recorder";
+import { createStore } from "../src/store";
+import { BrainStream } from "../src/stream";
+import { FakeEventSource, fakeFetch, hello, json, room, seqRange } from "./fakes";
+
+const ES = FakeEventSource as unknown as typeof EventSource;
+const meter = () => {
+  const calls: Array<[string, number, Record<string, string>]> = [];
+  return { calls, observe: (name: string, v: number, labels: Record<string, string> = {}) => void calls.push([name, v, labels]) };
+};
+const handlers = { onUnauthorized: vi.fn(), onCooldown: vi.fn(), onLockdown: vi.fn() };
+beforeEach(() => { FakeEventSource.reset(); resetPageMarks(); });
+
+it("times each API call by route pattern, method and status class, but not its own reports", async () => {
+  let t = 0; const m = meter();
+  const f = fakeFetch({ "GET /api/rooms/room-a/messages?limit=100": json([]), "POST /api/commands": json({ error: { code: "stepup_required", message: "x", stepUpId: "su-1" } }, 428), "POST /api/metrics/client": json({}) });
+  const api = createApi({ fetch: async (...a: Parameters<typeof fetch>) => { t += 40; return f.fn(...a); }, ...handlers, meter: m, now: () => t });
+  await api.messages("room-a", { limit: 100 });
+  await expect(api.command({ room: "room-cos", argv: ["register", "board-a"] }, "k")).rejects.toBeInstanceOf(ApiError);
+  await api.postClientMetrics([]);
+  expect(m.calls).toEqual([
+    [CLIENT_METRICS.api, 0.04, { route: "/api/rooms/:id/messages", method: "GET", status: "2xx" }],
+    [CLIENT_METRICS.api, 0.04, { route: "/api/commands", method: "POST", status: "4xx" }],
+  ]);
+});
+it("records a request that never reached the brain as status network", async () => {
+  const m = meter();
+  const api = createApi({ fetch: async () => { throw new TypeError("Failed to fetch"); }, ...handlers, meter: m, now: () => 0 });
+  await expect(api.rooms()).rejects.toMatchObject({ status: 0 });
+  expect(m.calls).toEqual([[CLIENT_METRICS.api, 0, { route: "/api/rooms", method: "GET", status: "network" }]]);
+});
+it("reads GET /api/metrics and posts client records with the CSRF header", async () => {
+  const f = fakeFetch({ "GET /api/metrics?format=json": json({ brain: { at: 1 }, instances: {} }), "POST /api/metrics/client": json({}) });
+  const api = createApi({ fetch: f.fn, ...handlers });
+  expect(await api.metrics()).toEqual({ brain: { at: 1 }, instances: {} });
+  const rec = { r: "obs" as const, name: CLIENT_METRICS.api, v: 0.1, t: 1, labels: {} };
+  await api.postClientMetrics([rec]);
+  expect(f.calls[1]).toMatchObject({ method: "POST", url: "/api/metrics/client", credentials: "same-origin", body: { records: [rec] } });
+  expect(f.calls[1].headers.get("x-swarm-os")).toBe("1");
+});
+it("times the stream's first connection and each reconnection", () => {
+  let t = 0; const m = meter();
+  const s = new BrainStream({ url: "/api/stream?rooms=all", onEvent: () => {}, onStatus: () => {}, onResync: () => {}, probeSession: async () => "ok", EventSourceImpl: ES, meter: m, now: () => t });
+  s.connect(); t = 250; FakeEventSource.last().open();
+  t = 1000; FakeEventSource.last().fail(0); t = 1600; FakeEventSource.last().open();
+  expect(m.calls).toEqual([[CLIENT_METRICS.streamConnect, 0.25, { kind: "first" }], [CLIENT_METRICS.streamConnect, 0.6, { kind: "reconnect" }]]);
+});
+it("times each event from receipt to the paint after it, and marks the first hello once per page", () => {
+  let t = 100;
+  const recorder = new ClientRecorder({ post: vi.fn(async () => {}) });
+  const observe = vi.spyOn(recorder, "observe");
+  const f = fakeFetch({ "GET /api/rooms/room-cos/messages?limit=100": json([]) });
+  const client = createClient({ fetch: f.fn, EventSourceImpl: ES, onUnauthorized: vi.fn(), recorder, now: () => t, afterPaint: (fn) => { t += 16; fn(); } });
+  client.stream.connect(); FakeEventSource.last().open();
+  FakeEventSource.last().send(hello({ rooms: [room("room-cos", "cos")] }), 1);
+  FakeEventSource.last().send(hello({ rooms: [room("room-cos", "cos")] }), 2);
+  expect(observe.mock.calls.filter(([n]) => n === CLIENT_METRICS.eventRender)).toEqual([[CLIENT_METRICS.eventRender, 0.016, { type: "hello" }], [CLIENT_METRICS.eventRender, 0.016, { type: "hello" }]]);
+  expect(observe.mock.calls.filter(([n, , l]) => n === CLIENT_METRICS.pageLoad && l?.phase === "first_hello")).toHaveLength(1);
+});
+it("times a refill of the rooms it holds", async () => {
+  let t = 0; const m = meter();
+  const store = createStore({ fetchMessages: async () => { t += 30; return t === 30 ? seqRange("room-a", 1, 1) : []; }, fetchRooms: async () => [], meter: m, now: () => t });
+  store.applyEvent(hello({ rooms: [room("room-a", "board")] }));
+  await store.setActiveRoom("room-a");
+  store.applyEvent({ type: "gap" });
+  await store.whenIdle();
+  expect(m.calls).toEqual([[CLIENT_METRICS.refill, 0.03, {}]]);
+});
+it("records the navigation timing phases", () => {
+  const m = meter();
+  recordPageLoad(m, { startTime: 0, domainLookupStart: 5, domainLookupEnd: 25, connectStart: 25, connectEnd: 65, requestStart: 70, responseStart: 190, responseEnd: 230, domContentLoadedEventEnd: 600, loadEventEnd: 900 } as PerformanceNavigationTiming);
+  expect(m.calls.map(([, v, l]) => [l.phase, v])).toEqual([["dns", 0.02], ["connect", 0.04], ["ttfb", 0.19], ["response", 0.04], ["dom_ready", 0.6], ["load", 0.9]]);
+  markFirstHello(m, 1200);
+  markFirstHello(m, 1300);
+  expect(m.calls.at(-1)).toEqual([CLIENT_METRICS.pageLoad, 1.2, { phase: "first_hello" }]);
+});
+it("records long tasks where the browser reports them, and nothing where it cannot", () => {
+  const m = meter();
+  let report!: (list: { getEntries(): Array<{ duration: number }> }) => void;
+  class FakeObserver { static supportedEntryTypes = ["longtask"]; constructor(cb: typeof report) { report = cb; } observe = vi.fn(); disconnect = vi.fn(); }
+  const stop = observeLongTasks(m, FakeObserver as unknown as typeof PerformanceObserver);
+  report({ getEntries: () => [{ duration: 120 }, { duration: 75 }] });
+  stop();
+  expect(m.calls).toEqual([[CLIENT_METRICS.longTask, 0.12, {}], [CLIENT_METRICS.longTask, 0.075, {}]]);
+  expect(() => observeLongTasks(m, class { static supportedEntryTypes = ["paint"]; } as unknown as typeof PerformanceObserver)()).not.toThrow();
+});
+```
+
+```tsx
+// packages/os-web/tests/performance.test.tsx
+import { act, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { ApiError } from "../src/api";
+import { Layout } from "../src/components/Layout";
+import { formatBytes, formatSeconds, latencyRows } from "../src/metrics/perf-model";
+import { brainMetrics, hello, hist, instance, metricsEvent, room, snap } from "./fakes";
+import { renderWithClient } from "./render";
+
+const ROOMS = [room("room-cos", "cos", { name: "Chief of staff" }), room("room-i1", "instance", { name: "project-a · card 42" })];
+async function openPerformance(api: Record<string, unknown> = {}) {
+  const r = renderWithClient(<Layout onSignOut={vi.fn()} />, { api: { metrics: vi.fn(async () => brainMetrics()), ...api } });
+  await act(async () => { r.store.applyEvent(hello({ rooms: ROOMS, instances: [instance({ id: "inst-1", roomId: "room-i1", cardId: "42" })] })); await r.store.whenIdle(); });
+  await userEvent.click(screen.getByRole("button", { name: "Performance" }));
+  await screen.findByRole("table", { name: "HTTP by route" });
+  return r;
+}
+
+it("opens from the header with the brain's latencies and process numbers", async () => {
+  const { api } = await openPerformance();
+  const main = screen.getByRole("main", { name: "Performance" });
+  for (const name of ["Brain", "Instances", "Process", "Client"]) expect(within(main).getByRole("region", { name })).toBeInTheDocument();
+  expect(within(screen.getByRole("table", { name: "HTTP by route" })).getByRole("row", { name: "/api/rooms GET 2xx 12 ms 40 ms 120" })).toBeInTheDocument();
+  expect(within(screen.getByRole("table", { name: "Card seen to" })).getByRole("row", { name: "dispatch 4.0 s 4.0 s 1" })).toBeInTheDocument();
+  const process = within(screen.getByRole("region", { name: "Process" }));
+  for (const text of ["p50 0.4 ms · p99 8 ms · max 40 ms", "heap 120.0 MB · rss 300.0 MB · system free 6.0 GB", "load 1.20 · user 12.0 s · system 3.0 s", "112.0 GB"]) expect(process.getByText(text)).toBeInTheDocument();
+  expect(within(screen.getByRole("region", { name: "Instances" })).getByText("No live instance has reported metrics yet.")).toBeInTheDocument();
+  expect(api.metrics).toHaveBeenCalledTimes(1);
+});
+it("takes live numbers from the metrics event without fetching again", async () => {
+  const { store, api } = await openPerformance();
+  act(() => store.applyEvent(metricsEvent({ top: [{ name: "swarm_os_store_op_seconds", labels: { op: "find", kind: "message", outcome: "ok" }, count: 9, totalSeconds: 31, meanSeconds: 3.4, p50: 2, p99: 9, share: null }] })));
+  expect(within(screen.getByRole("table", { name: "Top time sinks" })).getByRole("row", { name: "swarm_os_store_op_seconds{op=find,kind=message,outcome=ok} 9 31.0 s 2.0 s 9.0 s" })).toBeInTheDocument();
+  expect(api.metrics).toHaveBeenCalledTimes(1);
+});
+it("shows each live instance's phases, top sinks and tokens by role", async () => {
+  const instanceSnap = snap({
+    histograms: [
+      hist("swarm_run_phase_seconds", { phase: "agents", outcome: "ok" }, { count: 1, sum: 300, p50: 300, p99: 300 }),
+      hist("swarm_run_phase_seconds", { phase: "setup", outcome: "ok" }, { count: 1, sum: 100, p50: 100, p99: 100 }),
+      hist("swarm_agent_api_seconds", { role: "worker" }, { count: 4, sum: 200, p50: 50, p99: 80 }),
+      hist("swarm_git_command_seconds", { op: "fetch" }, { count: 2, sum: 30, p50: 15, p99: 20 }),
+    ],
+    counters: [{ name: "swarm_agent_tokens_total", labels: { role: "worker", backend: "claude-code", kind: "input" }, value: 1_140_000 }, { name: "swarm_agent_tokens_total", labels: { role: "worker", backend: "claude-code", kind: "output" }, value: 12_345 }],
+  });
+  await openPerformance({ metrics: vi.fn(async () => brainMetrics({ instances: { "inst-1": { at: 0, snapshot: instanceSnap } } })) });
+  const card = within(screen.getByRole("article", { name: "Instance metrics 42" }));
+  expect(card.getByText("agents 5m 00s (75%) · setup 1m 40s (25%)")).toBeInTheDocument();
+  expect(card.getByText("worker 1.14M in / 12.3k out")).toBeInTheDocument();
+  expect(card.getAllByRole("row").map((r) => r.textContent)).toEqual([expect.any(String), expect.stringMatching(/^swarm_agent_api_seconds\{role=worker\}4/), expect.stringMatching(/^swarm_git_command_seconds\{op=fetch\}2/)]);
+});
+it("lists this dashboard's own timings", async () => {
+  const { client } = await openPerformance();
+  act(() => client.recorder.observe("swarm_os_client_api_seconds", 0.05, { route: "/api/rooms", method: "GET", status: "2xx" }));
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(await within(screen.getByRole("table", { name: "This dashboard" })).findByRole("row", { name: "api route=/api/rooms method=GET status=2xx 50 ms 50 ms 1" })).toBeInTheDocument();
+});
+it("says when the brain's metrics cannot be loaded", async () => {
+  renderWithClient(<Layout onSignOut={vi.fn()} />, { api: { metrics: vi.fn(async () => { throw new ApiError(503, "store_unavailable", "store down"); }) } });
+  await userEvent.click(screen.getByRole("button", { name: "Performance" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Metrics unavailable: store down");
+});
+it("goes back to the room when a channel is picked", async () => {
+  await openPerformance();
+  await userEvent.click(within(screen.getByRole("navigation", { name: "Channels" })).getByRole("button", { name: "Chief of staff" }));
+  expect(screen.getByRole("main", { name: "Room" })).toBeInTheDocument();
+});
+it("orders latency series by total time and keys them by their label values in the definition's order", () => {
+  expect(latencyRows(brainMetrics().brain, ["swarm_os_http_request_seconds"]).map((r) => r.key)).toEqual(["/api/rooms GET 2xx", "/api/commands POST 4xx"]);
+});
+it("formats seconds and bytes like the rest of swarm", () => {
+  expect([0.0004, 0.012, 3.2, 245, 4320].map(formatSeconds)).toEqual(["0.4 ms", "12 ms", "3.2 s", "4m 05s", "1h 12m"]);
+  expect([512, 12_288, 1_258_291, 3_650_722_201].map(formatBytes)).toEqual(["512 B", "12.0 KB", "1.2 MB", "3.4 GB"]);
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `pnpm install && pnpm --filter @mnmal-ai/swarm-os-web exec vitest run tests/metrics-recorder.test.ts tests/metrics-timings.test.ts tests/performance.test.tsx`
+Expected: FAIL, `Failed to resolve import "../src/metrics/recorder"` (and `"../src/metrics/names"`, `"../src/metrics/perf-model"`).
+
+- [ ] **Step 3: Implement, and append the rows**
+
+- **`types.ts`.** Add `BrainMetrics` and `MetricsEvent`, add `MetricsEvent` to `BrainEvent`, and add `"metrics"` to `STREAM_EVENT_TYPES`, so `BrainStream` listens for it like any other named event. The types come from `import type { … } from "@mnmal-ai/swarm-metrics"`.
+- **`recorder.ts`.**
+  - `observe` keeps per-series stats, keyed by name and sorted labels: count, sum, max, and a ring of the last `CLIENT_STATS_RESERVOIR` values. `p50` and `p99` use plan 10's nearest rank over that ring (the value at `ceil(q × n) − 1` of the sorted ring).
+  - `flush` posts `post(batch, opts)` batch by batch. A rejection with an `ApiError` of status 0, or 500 and above, puts the batch back at the front (keeping the cap) and stops this flush. Any other rejection drops the batch, adds its length to `dropped`, and goes on. `flush` itself never rejects.
+  - `start` uses `setInterval(CLIENT_FLUSH_MS)`. Only one flush runs at a time.
+- **`browser.ts`.**
+  - `recordPageLoad` observes `swarm_os_client_page_load_seconds` for `dns` (`domainLookupEnd − domainLookupStart`), `connect` (`connectEnd − connectStart`), `ttfb` (`responseStart − startTime`), `response` (`responseEnd − responseStart`), `dom_ready` (`domContentLoadedEventEnd − startTime`) and `load` (`loadEventEnd − startTime`), in that order, in seconds. It skips a negative value.
+  - `observePageLoad` runs it once per page: at once when `document.readyState` is `complete`, else on `load` after a `setTimeout(0)`. It does nothing where `performance.getEntriesByType` is missing.
+  - `markFirstHello` observes `{ phase: "first_hello" }` once per page.
+  - `observeLongTasks` takes `Observer ?? globalThis.PerformanceObserver`, returns a no-op unless its `supportedEntryTypes` includes `"longtask"`, and otherwise observes `{ type: "longtask", buffered: true }` and records each entry's `duration / 1000`.
+- **`api.ts`.** The one request helper takes each method's route pattern, as the overview writes it (`/api/rooms/:id/messages`, `/api/questions/:id/answer`, `/api/auth/cli/:nonce/approve`, …). It reads `now()` before `fetch` and again after the body is read, or after `fetch` throws. It then observes `swarm_os_client_api_seconds { route, method, status }`, where `status` is the status class or `network`, before the error side effects run. `postClientMetrics` sends `{ records }` with `X-Swarm-Os: 1`, passes `keepalive` through to `fetch`, and is never timed. `metrics` builds `format=json`, then `since` and `names` (comma-joined) when given.
+- **`stream.ts`.** `connect()` and each replacement `EventSource` set a start time, with kind `first` for the stream's first `EventSource` and `reconnect` after it. An `onerror` with `readyState` 0 also sets a start time, kind `reconnect`. `onopen` observes `swarm_os_client_stream_connect_seconds { kind }` when a start time is set, and clears it.
+- **`store.ts`.** A `metrics` event replaces `State.metrics`. `hello` leaves it alone, and it starts `null`. `refillRooms` observes `swarm_os_client_refill_seconds` over its whole run, from before the first fetch to the last room's settle, when it holds at least one room.
+- **`client.ts`.**
+  - `recorder = deps.recorder ?? new ClientRecorder({ post: (records, opts) => api.postClientMetrics(records, opts) })`. The closure binds `api` late, so it is built first and handed to `createApi`, `createStore` and `BrainStream` as `meter`, with `now = deps.now ?? (() => performance.now())`.
+  - `onEvent` becomes `(e) => { const t0 = now(); store.applyEvent(e); if (e.type === "hello") markFirstHello(recorder, pageClock()); paint(() => recorder.observe(CLIENT_METRICS.eventRender, (now() - t0) / 1000, { type: e.type })); }`, where `paint = deps.afterPaint ?? afterPaint`.
+- **`App.tsx`.** `Connected`'s mount effect calls `client.recorder.start()`, `observePageLoad(client.recorder)` and `observeLongTasks(client.recorder)`, and listens for `pagehide` with `client.recorder.flush({ keepalive: true })`. Its cleanup removes the listener, stops the long-task observer and calls `client.recorder.stop()`.
+- **`Layout.tsx` and `Performance.tsx`.** As described above. The view uses only `useClient()` and `useClientState`. The Client table reads `recorder.stats()` on each render, which every metrics event and the Refresh button cause.
+- **`perf-model.ts`.** `processView` reads `swarm_process_event_loop_delay_seconds` by `stat`, `swarm_process_heap_used_bytes`, `swarm_process_rss_bytes`, `swarm_process_system_free_bytes`, `swarm_process_load_average`, `swarm_process_disk_free_bytes` by `disk` (in `disk` order), and `swarm_process_cpu_seconds_total` by `mode` from the counters. `formatSeconds` follows plan 10's `formatDuration`: under 1 ms, one decimal of ms; under 1 s, whole ms; under 60 s, one decimal of s; under an hour, `<m>m <ss>s`; else `<h>h <mm>m`. `formatBytes` uses powers of 1024, with one decimal from KB up.
+- **`tests/fakes.ts` and `tests/render.tsx`.** `fakeApi`'s `metrics` defaults to `{ brain: snap(), instances: {} }` and `postClientMetrics` to `undefined`. `renderWithClient`'s client gains `recorder: new ClientRecorder({ post: api.postClientMetrics })`.
+- **The catalogue.** Append the block above under the `// plan 07` line of `OS_METRICS` in `packages/metrics/src/catalogue/os.ts`. Change nothing else in that file. Every name in it is a string literal in `src/metrics/names.ts`, which plan 10's catalogue-completeness test finds once plan 09 turns on `includeOs`.
+
+- [ ] **Step 4: Run the tests, the build and the plan's checks**
+
+Run: `pnpm --filter @mnmal-ai/swarm-os-web test && cd packages/metrics && npx vitest run && cd ../.. && pnpm -w build`
+Expected: PASS, with `metrics-recorder` 6, `metrics-timings` 8 and `performance` 8 among the files, and every earlier os-web test unchanged. The metrics package still defines its catalogue cleanly, and every turbo task succeeds.
+
+Run:
+
+```bash
+grep -rn "@mnmal-ai/swarm-metrics" packages/os-web/src | grep -v "import type"
+grep -rln "fetch(" packages/os-web/src | grep -v "^packages/os-web/src/api.ts$"
+grep -rnE "https?://|localStorage|sessionStorage|innerHTML" packages/os-web/src
+grep -rnE "#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(" packages/os-web/src
+```
+
+Expected: the four greps print nothing. The first is what keeps node modules out of the browser bundle: os-web takes only types from the metrics library.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os-web packages/metrics/src/catalogue/os.ts pnpm-lock.yaml
+git -c commit.gpgsign=false commit -m "feat(os-web): measure the dashboard, and show every metric in a Performance view"
 ```

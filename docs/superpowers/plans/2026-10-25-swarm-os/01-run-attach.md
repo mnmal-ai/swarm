@@ -27,6 +27,7 @@
 - Tests bind `127.0.0.1:0` only, never touch `~/.swarm` or ports 32337 to 32341, and run with `ANTHROPIC_API_KEY` unset.
 - Typed errors (`CardPinError`, `OsAttachError`, `RoomApiError`); conventional commit subjects; never commit `packages/cli/src/version.ts`.
 - `@modelcontextprotocol/sdk` is added to `packages/cli` at exactly `1.32.1` (the lockfile's version) and `zod` at `^4.6.5` (as `packages/substrate-plugin` has it).
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 13 records the rows.
 
 ## Review Focus
 
@@ -1607,4 +1608,438 @@ Expected: PASS, all green; the verifier exits 0.
 ```bash
 git add packages/cli/src/cli/os-attach.ts packages/cli/src/cli/os-attach.test.ts packages/cli/src/cli/run.ts
 git commit -m "feat(run): questions through Swarm OS, room tools in every session, timers held while a question waits"
+```
+
+---
+
+### Task 13: Metrics
+
+The run side of the owner's metrics requirement: every call the attachment makes to the brain, the event forward and its lag, the command stream, the run's questions and the timers they hold, the room MCP server's tools (recorded in that child process's own registry and file), `--card` fetches and per-card checkpoint I/O, and the forward of the run registry's snapshot to the brain every 15 s and at exit. It comes last because Task 12 does not depend on it.
+
+**Files:**
+- Create: `packages/cli/src/cli/os-attach-metrics.test.ts`, `packages/cli/src/cli/room-metrics.test.ts`
+- Modify: `packages/metrics/src/catalogue/os.ts` (this plan's block, in the `// plan 01` slot of `OS_METRICS`; when plan 10 left no such marker, add it as the array's first line, above `// plan 02`)
+- Modify: `packages/types/src/os-protocol.ts`, `packages/types/src/suspendable-timer.ts`
+- Test: `packages/types/tests/suspendable-timer.test.ts` (append)
+- Modify: `packages/cli/src/cli/os-attach.ts`, `packages/cli/src/cli/room-client.ts`, `packages/cli/src/cli/room-mcp.ts`, `packages/cli/src/cli/question-gate.ts`, `packages/cli/src/cli/card-pin.ts`, `packages/cli/src/cli/__fixtures__/fake-brain.ts`, `packages/cli/src/cli/run.ts`
+- Modify: `packages/cli/package.json` (`"@mnmal-ai/swarm-metrics": "workspace:*"`, unless plan 10 added it: `grep -n swarm-metrics packages/cli/package.json`), `pnpm-lock.yaml`
+- Test: `packages/cli/tests/room-mcp-process.test.ts` (append)
+
+**Interfaces:**
+- Consumes: from `@mnmal-ai/swarm-metrics` (plan 10): `Metrics`, `noopMetrics`, `Labels`, `MetricDef`, `MetricsSnapshot`, `MetricsRegistry`, `JsonlMetricsSink`, `startProcessSampler`, `defineAll`, `OS_METRICS`; `testRegistry` from `@mnmal-ai/swarm-metrics/testing`. From plan 10's edits to `run.ts`: `runMetrics`, the run's registry with `run_id` and `process: "run"` as base labels, and the directory its sink writes (`<swarm dir>/metrics`), called `runMetricsDir` below. This task calls `runMetrics.snapshot()`; if plan 10 hands `run.ts` only a `with(...)` view, use the registry it was made from. Tasks 2 to 12.
+- Produces:
+
+```ts
+// packages/types/src/os-protocol.ts
+export const OS_METRICS_FORWARD_MS = 15_000;
+export interface MetricsForwardBody<S = unknown> { snapshot: S }   // POST /api/instances/:id/metrics; plan 04's route reads MetricsForwardBody<MetricsSnapshot>
+
+// packages/types/src/suspendable-timer.ts: each tick tells the predicate its length, so a caller can count suspended time
+export function startSuspendableTimer(limitMs: number, suspended: (tickMs: number) => boolean, onExpire: () => void, tickMs?: number): () => void;
+
+// packages/cli/src/cli/question-gate.ts
+export class QuestionGate { constructor(now?: () => number, metrics?: Metrics); /* Task 4's methods, unchanged */ }
+export type SuspendedTimer = "query_timeout" | "orchestrator" | "wedge_watcher";
+export function suspendedPredicate(gate: QuestionGate, timer: SuspendedTimer, metrics?: Metrics): (tickMs?: number) => boolean;   // gate.isOpen(); while open, adds tickMs / 1000 to the timer's counter
+export function bindToGate(gate: QuestionGate | undefined, target: { pause(): void; resume(): void }, observe?: { metrics: Metrics; timer: SuspendedTimer }): () => void;   // adds the gate's open time while target was paused, at resume and at unbind
+
+// packages/cli/src/cli/room-client.ts
+export type BrainCallOutcome = "ok" | "refused" | "rejected" | "unavailable" | "unreachable" | "timeout";
+export function brainCallOutcome(status: number | null, timedOut?: boolean): BrainCallOutcome;   // 2xx ok; 401, 403, 404 refused; 429 and 5xx unavailable; any other status rejected; no response unreachable, or timeout when the request's own bound aborted it
+export const ROOM_MCP_METRICS_ENV: readonly ["SWARM_METRICS_DIR", "SWARM_RUN_ID"];
+export function roomMcpMetricsFromEnv(env: Record<string, string | undefined>): { dir: string; runId: string } | null;   // null unless both are set
+export class RoomClient { constructor(config: RoomMcpConfig, opts?: { metrics?: Metrics }); /* Task 7's methods, unchanged */ }
+export interface AskHumanDeps { sleep?: (ms: number) => Promise<void>; now?: () => number; metrics?: Metrics; asker?: "agent" | "run" }   // asker default "agent"
+
+// packages/cli/src/cli/room-mcp.ts (signatures unchanged)
+// createRoomMcpServer(client, deps?) times each tool on deps.metrics and asks with asker "agent";
+// runRoomMcp(env) records into a registry of its own whenever roomMcpMetricsFromEnv(env) is not null.
+
+// packages/cli/src/cli/os-attach.ts
+export interface OsAttachOptions { /* Task 9's fields */ metrics?: Metrics; snapshot?: () => MetricsSnapshot; metricsMs?: number; monoNow?: () => number }   // metricsMs default OS_METRICS_FORWARD_MS; monoNow default performance.now
+export interface RunMetricsFiles { dir: string; runId: string }
+export function roomServerEntry(session: RoomSession, self?: string[], files?: RunMetricsFiles): Record<string, McpStdioServer>;   // with files, env gains SWARM_METRICS_DIR and SWARM_RUN_ID after the four room variables; without, it is exactly Task 10's
+export function roomSessionMcp(attachment: Pick<OsAttachment, "openSession">, role: SessionRole, gate: QuestionGate, files?: RunMetricsFiles): () => Promise<SessionMcp | null>;
+export function withOsRoles(configs: Record<AgentRole, BackendConfig>, attachment: Pick<OsAttachment, "openSession" | "ask">, gate: QuestionGate, metrics?: Metrics, files?: RunMetricsFiles): Record<AgentRole, BackendConfig>;   // timersSuspended: suspendedPredicate(gate, "query_timeout", metrics)
+
+// packages/cli/src/cli/card-pin.ts
+export function fetchPinnedItem(source: { fetchItem(externalId: string): Promise<ExternalItem | null> }, cardId: string, kind: "trello" | "github", metrics?: Metrics): Promise<ExternalItem | null>;
+export function timeCardCheckpoints<T extends { loadCheckpoint(): Promise<unknown>; saveCheckpoint(...args: never[]): Promise<void> }>(target: T, metrics: Metrics): T;   // replaces both methods on the instance with timed ones and returns it
+
+// packages/cli/src/cli/__fixtures__/fake-brain.ts
+// FakeBrain gains `readonly metricsPosts: unknown[]` (each body's `snapshot`), and serves POST /api/instances/:id/metrics (instance bearer, failNext and hang apply) with 200 { ok: true }
+```
+
+Catalogue rows (all in the run's registry, except `swarm_agent_room_tool_seconds` and the room client's rows when they run inside `swarm room-mcp`, which carry `process: "room-mcp"`):
+
+| Name | Kind | Unit | Labels (values) | Recorded in |
+|---|---|---|---|---|
+| `swarm_run_os_request_seconds` | histogram | seconds | `route` (`attach`, `heartbeat`, `events`, `exit`, `sessions`, `metrics`), `outcome` (`BrainCallOutcome`) | `OsAttachment`'s one private POST helper, which every up-call of Tasks 9 to 11 and the forward go through |
+| `swarm_run_os_attach_seconds` | histogram | seconds | `outcome` (`attached`, `refused`, `closed`) | `OsAttachment.attach()`: from the call until the attachment is first attached (also in the background, after `attachWaitMs`), refused, or closed by `exit()` |
+| `swarm_run_os_outage_seconds` | histogram | seconds | none | `OsAttachment`: from the `Swarm OS unreachable …` line to `Swarm OS reachable again.` |
+| `swarm_run_os_batch_events` | histogram | count | none | `OsAttachment.forward()`'s batch sender, per batch the brain accepted (the `os:events_dropped` marker included) |
+| `swarm_run_os_event_lag_seconds` | histogram | seconds | none | the same, per forwarded event (not the marker): from `onAny` seeing it (`monoNow()`) to its batch's 2xx |
+| `swarm_run_os_queued_events` | gauge | count | none | `forward()`'s buffer, set on every push, drop and accepted batch (a batch in flight still counts) |
+| `swarm_run_os_events_dropped_total` | counter | count | `reason` (`buffer_full`, `refused`) | `forward()`: past `OS_EVENT_BUFFER_MAX`, and every event seen after a refusal |
+| `swarm_run_os_stream_connects_total` | counter | count | `kind` (`first`, `reconnect`) | the command stream's `onOpen` |
+| `swarm_run_os_command_seconds` | histogram | seconds | `command` (`pause`, `stop`, `answer`, `unknown`), `outcome` (`ok`, `error`, `ignored`) | the stream's `onEvent` for `command` (start) to the handler returning (end); a command queued before `onCommand` keeps its span open until it is delivered |
+| `swarm_run_os_forward_bytes` | histogram | bytes | none | the metrics forward, per body built |
+| `swarm_run_question_wait_seconds` | histogram | seconds | `asker` (`agent`, `run`), `outcome` (`answered`, `proceeded`, `stopped`) | `askHuman`: from its first post to its return |
+| `swarm_run_question_gate_open_seconds` | histogram | seconds | none | `QuestionGate`: each closed-to-open to open-to-closed spell |
+| `swarm_run_timer_suspended_seconds_total` | counter | seconds | `timer` (`query_timeout`, `orchestrator`, `wedge_watcher`) | `suspendedPredicate` (the claude-code query timeout, and the orchestrator's heartbeat and per-task timeout, which share one predicate) and `bindToGate` (the wedge watchers) |
+| `swarm_run_room_request_seconds` | histogram | seconds | `route` (`send`, `read`, `ask`, `question`, `who`), `outcome` (`BrainCallOutcome`) | `RoomClient`'s one private request helper, in the run (its own questions) and in `swarm room-mcp` |
+| `swarm_agent_room_tool_seconds` | histogram | seconds | `tool` (`send`, `read`, `ask_human`, `who`), `outcome` (`ok`, `refused`, `rejected`, `unavailable`, `unreachable`, `error`) | `createRoomMcpServer`'s four handlers |
+| `swarm_run_card_fetch_seconds` | histogram | seconds | `source` (`trello`, `github`), `outcome` (`found`, `not_found`, `error`) | `fetchPinnedItem`, called by `run.ts` section 3 |
+| `swarm_run_card_checkpoint_seconds` | histogram | seconds | `op` (`read`, `write`), `outcome` (`found`, `none`, `ok`, `error`) | `timeCardCheckpoints`, around a pinned run's `Orchestrator.loadCheckpoint` and `saveCheckpoint` |
+
+The `MetricDef` entries, appended in the `// plan 01` slot:
+
+```ts
+  // plan 01
+  { name: "swarm_run_os_request_seconds", kind: "histogram", unit: "seconds", help: "A run's calls to the brain, by route word and outcome", labels: ["route", "outcome"] },
+  { name: "swarm_run_os_attach_seconds", kind: "histogram", unit: "seconds", help: "From a run's attach call until it is attached, refused or closed", labels: ["outcome"] },
+  { name: "swarm_run_os_outage_seconds", kind: "histogram", unit: "seconds", help: "Each spell the brain was unreachable from a run", labels: [] },
+  { name: "swarm_run_os_batch_events", kind: "histogram", unit: "count", help: "Events in each batch the brain accepted", labels: [] },
+  { name: "swarm_run_os_event_lag_seconds", kind: "histogram", unit: "seconds", help: "From a run event's emission to the brain accepting it", labels: [] },
+  { name: "swarm_run_os_queued_events", kind: "gauge", unit: "count", help: "Run events not yet accepted by the brain", labels: [] },
+  { name: "swarm_run_os_events_dropped_total", kind: "counter", unit: "count", help: "Run events never forwarded, by reason", labels: ["reason"] },
+  { name: "swarm_run_os_stream_connects_total", kind: "counter", unit: "count", help: "Opens of a run's command stream", labels: ["kind"] },
+  { name: "swarm_run_os_command_seconds", kind: "histogram", unit: "seconds", help: "From a brain command's arrival to the run applying it", labels: ["command", "outcome"] },
+  { name: "swarm_run_os_forward_bytes", kind: "histogram", unit: "bytes", help: "Body size of each metrics forward to the brain", labels: [] },
+  { name: "swarm_run_question_wait_seconds", kind: "histogram", unit: "seconds", help: "From a question being asked to its answer, proceed or stop", labels: ["asker", "outcome"] },
+  { name: "swarm_run_question_gate_open_seconds", kind: "histogram", unit: "seconds", help: "Each spell the question gate held the run's session timers", labels: [] },
+  { name: "swarm_run_timer_suspended_seconds_total", kind: "counter", unit: "seconds", help: "Seconds a session timer spent suspended by an open question", labels: ["timer"] },
+  { name: "swarm_run_room_request_seconds", kind: "histogram", unit: "seconds", help: "Room-token calls to the brain, by route word and outcome", labels: ["route", "outcome"] },
+  { name: "swarm_agent_room_tool_seconds", kind: "histogram", unit: "seconds", help: "swarm-room MCP tool calls, by tool and outcome", labels: ["tool", "outcome"] },
+  { name: "swarm_run_card_fetch_seconds", kind: "histogram", unit: "seconds", help: "--card fetches from the task source", labels: ["source", "outcome"] },
+  { name: "swarm_run_card_checkpoint_seconds", kind: "histogram", unit: "seconds", help: "A pinned run's checkpoint reads and writes", labels: ["op", "outcome"] },
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `packages/types/tests/suspendable-timer.test.ts` (fake timers, as the file has them):
+
+```ts
+it("tells the predicate each tick's length", () => {
+  const ticks: number[] = [];
+  const cancel = startSuspendableTimer(10_000, (tickMs) => { ticks.push(tickMs); return false; }, () => {});
+  vi.advanceTimersByTime(3_000); cancel();
+  expect(ticks).toEqual([1_000, 1_000, 1_000]);
+});
+```
+
+`packages/cli/src/cli/os-attach-metrics.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { OS_METRICS, type Labels, type MetricsSnapshot } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { SwarmEventBus } from "@mnmal-ai/swarm-events";
+import { startFakeBrain, until, type FakeBrain } from "./__fixtures__/fake-brain.js";
+import { OsAttachment, roomServerEntry, type OsAttachOptions } from "./os-attach.js";
+import { ROOM_MCP_ENV, ROOM_MCP_METRICS_ENV } from "./room-client.js";
+
+const has = (have: Labels, want: Labels) => Object.entries(want).every(([k, v]) => have[k] === v);
+const hist = (s: MetricsSnapshot, name: string, labels: Labels = {}) => s.histograms.find((h) => h.name === name && has(h.labels, labels));
+const counter = (s: MetricsSnapshot, name: string, labels: Labels = {}) => s.counters.filter((c) => c.name === name && has(c.labels, labels)).reduce((n, c) => n + c.value, 0);
+const gauge = (s: MetricsSnapshot, name: string) => s.gauges.find((g) => g.name === name)?.value;
+const progress = (i: number) => ({ type: "tool_call" as const, detail: `call ${i}`, timestamp: i });
+const ATTACH = { runId: "run-project-a-abc123", dashboardUrl: null, pid: 4242 };
+
+let brain: FakeBrain; let att: OsAttachment | undefined; const logs: string[] = [];
+beforeEach(async () => { brain = await startFakeBrain(); logs.length = 0; });
+afterEach(async () => { await att?.exit({ reason: "completed", code: 0 }); att = undefined; await brain.stop(); });
+function make(o: Partial<OsAttachOptions> = {}) {
+  const { metrics, clock } = testRegistry(OS_METRICS);
+  const a = (att = new OsAttachment({ url: brain.url, token: brain.instanceToken, instanceId: brain.instanceId, heartbeatMs: 40, flushMs: 30, metricsMs: 40,
+    backoffMs: [20, 100], log: (l) => logs.push(l), metrics, snapshot: () => metrics.snapshot(), monoNow: () => clock.monoMs(), ...o }));
+  return { a, metrics, clock };
+}
+
+describe("OsAttachment metrics", () => {
+  it("times every brain call by route word and outcome", async () => {
+    brain.failNext(/\/attach$/, 503);
+    const { a, metrics } = make();
+    await a.attach(ATTACH);
+    await a.openSession("worker");
+    await until(() => brain.heartbeats.length > 0 && brain.metricsPosts.length > 0);
+    await a.exit({ reason: "completed", code: 0 });
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_os_request_seconds", { route: "attach", outcome: "unavailable" })?.count).toBe(1);
+    for (const route of ["attach", "heartbeat", "sessions", "metrics", "exit"]) {
+      expect(hist(s, "swarm_run_os_request_seconds", { route, outcome: "ok" })?.count, route).toBeGreaterThanOrEqual(1);
+    }
+    expect(hist(s, "swarm_run_os_attach_seconds", { outcome: "attached" })?.count).toBe(1);
+  });
+
+  it("records a refused attach once", async () => {
+    brain.failNext(/\/attach$/, 401);
+    const { a, metrics } = make();
+    await a.attach(ATTACH);
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_os_request_seconds", { route: "attach", outcome: "refused" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_os_attach_seconds", { outcome: "refused" })?.count).toBe(1);
+  });
+
+  it("forwards the run's snapshot, without definitions, on its interval and once more before the exit", async () => {
+    const { a, metrics } = make();
+    await a.attach(ATTACH);
+    await until(() => brain.metricsPosts.length >= 1);
+    await a.exit({ reason: "completed", code: 0 });
+    const paths = brain.requests.map((r) => r.path);
+    const base = `/api/instances/${brain.instanceId}`;
+    expect(paths.lastIndexOf(`${base}/metrics`)).toBeLessThan(paths.lastIndexOf(`${base}/exit`));
+    const last = brain.metricsPosts.at(-1) as MetricsSnapshot;
+    expect(last.defs).toEqual([]);
+    expect(last.histograms.some((h) => h.name === "swarm_run_os_request_seconds")).toBe(true);
+    expect(hist(metrics.snapshot(), "swarm_run_os_forward_bytes")?.count).toBeGreaterThanOrEqual(2);
+  });
+
+  it("stops only the forward when the brain keeps no metrics", async () => {
+    brain.failNext(/\/metrics$/, 404, 100);
+    const { a } = make();
+    await a.attach(ATTACH);
+    await until(() => logs.includes("Swarm OS does not keep run metrics (404); the run stops forwarding them."));
+    const forwards = () => brain.requests.filter((r) => r.path.endsWith("/metrics")).length;
+    const n = forwards(); const beats = brain.heartbeats.length;
+    await until(() => brain.heartbeats.length > beats + 2);
+    expect([forwards(), a.state]).toEqual([n, "attached"]);
+  });
+
+  it("measures batches, each event's lag to its batch, and the queue", async () => {
+    const bus = new SwarmEventBus(); const { a, metrics, clock } = make({ flushMs: 60_000 });
+    await a.attach(ATTACH); a.forward(bus);
+    for (let i = 0; i < 3; i++) bus.emit("backend:progress", progress(i));
+    expect(gauge(metrics.snapshot(), "swarm_run_os_queued_events")).toBe(3);
+    clock.advance(250);
+    await a.flush();
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_os_batch_events")).toMatchObject({ count: 1, sum: 3 });
+    expect(hist(s, "swarm_run_os_event_lag_seconds")).toMatchObject({ count: 3, min: 0.25, max: 0.25 });
+    expect(gauge(s, "swarm_run_os_queued_events")).toBe(0);
+  });
+
+  it("counts events dropped past the buffer, the outage it rode out, and the stream's reconnect", async () => {
+    const bus = new SwarmEventBus(); const { a, metrics } = make();
+    await a.attach(ATTACH); a.forward(bus); await until(() => brain.streams() === 1);
+    await brain.stop();
+    for (let i = 0; i < 2_100; i++) bus.emit("backend:progress", progress(i));
+    await new Promise((r) => setTimeout(r, 200));
+    await brain.restart(); await a.flush();
+    await until(() => logs.includes("Swarm OS reachable again."), 5_000);
+    await until(() => counter(metrics.snapshot(), "swarm_run_os_stream_connects_total", { kind: "reconnect" }) >= 1, 5_000);
+    const s = metrics.snapshot();
+    expect(counter(s, "swarm_run_os_events_dropped_total", { reason: "buffer_full" })).toBe(100);
+    expect(counter(s, "swarm_run_os_stream_connects_total", { kind: "first" })).toBe(1);
+    expect(hist(s, "swarm_run_os_outage_seconds")?.count).toBe(1);
+  }, 10_000);
+
+  it("times each command from its arrival to the handler that applies it", async () => {
+    const { a, metrics, clock } = make();
+    await a.attach(ATTACH); await until(() => brain.streams() === 1);
+    brain.command(["pause"]); await new Promise((r) => setTimeout(r, 50));
+    clock.advance(1_000);
+    const got: string[] = []; a.onCommand((c) => got.push(c.kind));
+    brain.command(["stop", "immediate"]); brain.command(["dance"]);
+    await until(() => got.length === 2 && logs.includes("Ignored a command from Swarm OS: dance"));
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_os_command_seconds", { command: "pause", outcome: "ok" })).toMatchObject({ count: 1, sum: 1 });
+    expect(hist(s, "swarm_run_os_command_seconds", { command: "stop", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_os_command_seconds", { command: "unknown", outcome: "ignored" })?.count).toBe(1);
+  });
+
+  it("hands the room server the run's metrics directory and id, and nothing else new", () => {
+    const s = { url: "http://127.0.0.1:3200", roomId: "room-1", participantId: "part-1", roomToken: "room_x", sessionId: "sess-1" };
+    const files = { dir: "/path/to/project/.swarm/metrics", runId: "run-project-a-abc123" };
+    const entry = roomServerEntry(s, ["/usr/local/bin/swarm"], files)["swarm-room"]!;
+    expect(Object.keys(entry.env!)).toEqual([...ROOM_MCP_ENV, ...ROOM_MCP_METRICS_ENV]);
+    expect(entry.env).toMatchObject({ SWARM_METRICS_DIR: files.dir, SWARM_RUN_ID: files.runId });
+    expect(Object.keys(roomServerEntry(s, ["/usr/local/bin/swarm"])["swarm-room"]!.env!)).toEqual([...ROOM_MCP_ENV]);
+  });
+});
+```
+
+`packages/cli/src/cli/room-metrics.test.ts` (the same `has`, `hist` and `counter` helpers at the top):
+
+```ts
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OS_METRICS, type Labels, type Metrics, type MetricsSnapshot } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { startSuspendableTimer, type ExternalItem } from "@mnmal-ai/swarm-types";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mintSession, startFakeBrain, until, type FakeBrain } from "./__fixtures__/fake-brain.js";
+import { askHuman, RoomClient } from "./room-client.js";
+import { createRoomMcpServer } from "./room-mcp.js";
+import { bindToGate, QuestionGate, suspendedPredicate } from "./question-gate.js";
+import { fetchPinnedItem, timeCardCheckpoints } from "./card-pin.js";
+
+describe("room calls, questions and tools", () => {
+  let brain: FakeBrain;
+  beforeEach(async () => { brain = await startFakeBrain({ questionHoldMs: 20 }); });
+  afterEach(async () => { await brain.stop(); });
+  const client = async (metrics: Metrics) => new RoomClient({ url: brain.url, roomId: brain.roomId, ...(await mintSession(brain)) }, { metrics });
+  const qid = () => [...brain.questions.keys()].at(-1)!;
+
+  it("times every room call by route and outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const c = await client(metrics);
+    await c.send("blocked on the schema"); await c.read(); await c.who();
+    brain.failNext(/\/who$/, 403); await c.who().catch(() => {});
+    const s = metrics.snapshot();
+    for (const route of ["send", "read", "who"]) expect(hist(s, "swarm_run_room_request_seconds", { route, outcome: "ok" })?.count, route).toBe(1);
+    expect(hist(s, "swarm_run_room_request_seconds", { route: "who", outcome: "refused" })?.count).toBe(1);
+  });
+
+  it("times a question from asked to answered, proceeded or stopped", async () => {
+    const { metrics, clock } = testRegistry(OS_METRICS);
+    const c = await client(metrics);
+    const answered = askHuman(c, "Rename it?", undefined, { metrics, asker: "run" });
+    await until(() => brain.questions.size === 1); clock.advance(90_000); brain.answer(qid(), "no"); await answered;
+    const proceeded = askHuman(c, "Rename the table?", undefined, { metrics, asker: "run" });
+    await until(() => brain.questions.size === 2); brain.proceed(qid(), null); await proceeded;
+    const stopped = askHuman(c, "Rename the column?", undefined, { metrics });
+    await until(() => brain.questions.size === 3); brain.failNext(/\/api\/questions\//, 401, 10); await stopped;
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_question_wait_seconds", { asker: "run", outcome: "answered" })).toMatchObject({ count: 1, sum: 90 });
+    expect(hist(s, "swarm_run_question_wait_seconds", { asker: "run", outcome: "proceeded" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_question_wait_seconds", { asker: "agent", outcome: "stopped" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_room_request_seconds", { route: "question", outcome: "refused" })?.count).toBe(1);
+  });
+
+  it("times each tool call by tool and outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createRoomMcpServer(await client(metrics), { metrics }).connect(st);
+    const mcp = new Client({ name: "test", version: "0" }); await mcp.connect(ct);
+    await mcp.callTool({ name: "send", arguments: { body: "x" } });
+    brain.failNext(/\/who$/, 403); await mcp.callTool({ name: "who", arguments: {} });
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_agent_room_tool_seconds", { tool: "send", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_agent_room_tool_seconds", { tool: "who", outcome: "refused" })?.count).toBe(1);
+  });
+});
+
+describe("the question gate and the timers it holds", () => {
+  it("times each spell it is open", () => {
+    const { metrics, clock } = testRegistry(OS_METRICS);
+    const gate = new QuestionGate(undefined, metrics);
+    gate.open("q1"); clock.advance(30_000); gate.open("q2"); gate.close("q1"); clock.advance(10_000); gate.close("q2");
+    expect(hist(metrics.snapshot(), "swarm_run_question_gate_open_seconds")).toMatchObject({ count: 1, sum: 40 });
+  });
+
+  it("counts the seconds a suspendable timer was held, tick by tick", () => {
+    vi.useFakeTimers();
+    try {
+      const { metrics } = testRegistry(OS_METRICS); const gate = new QuestionGate(undefined, metrics);
+      const cancel = startSuspendableTimer(60_000, suspendedPredicate(gate, "query_timeout", metrics), () => {});
+      gate.open("q"); vi.advanceTimersByTime(5_000); gate.close("q"); vi.advanceTimersByTime(3_000); cancel();
+      expect(counter(metrics.snapshot(), "swarm_run_timer_suspended_seconds_total", { timer: "query_timeout" })).toBe(5);
+      expect(suspendedPredicate(gate, "orchestrator", metrics)()).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("counts a paused target's held seconds from the gate's open time, also at unbind", () => {
+    let t = 0; const { metrics } = testRegistry(OS_METRICS);
+    const gate = new QuestionGate(() => t, metrics);
+    const unbind = bindToGate(gate, { pause() {}, resume() {} }, { metrics, timer: "wedge_watcher" });
+    gate.open("q"); t = 7_000; gate.close("q"); gate.open("q2"); t = 9_000; unbind();
+    expect(counter(metrics.snapshot(), "swarm_run_timer_suspended_seconds_total", { timer: "wedge_watcher" })).toBe(9);
+  });
+});
+
+describe("--card fetches and checkpoints", () => {
+  it("times a --card fetch by source and outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const item: ExternalItem = { externalId: "42", title: "Saved searches", body: "", state: "open", labels: [], url: "https://github.com/owner/project-a/issues/42" };
+    expect(await fetchPinnedItem({ fetchItem: async () => item }, "42", "github", metrics)).toBe(item);
+    expect(await fetchPinnedItem({ fetchItem: async () => null }, "43", "github", metrics)).toBeNull();
+    await expect(fetchPinnedItem({ fetchItem: async () => { throw new Error("Trello CLI failed (show)"); } }, "aaa111", "trello", metrics)).rejects.toThrow("Trello CLI failed (show)");
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_card_fetch_seconds", { source: "github", outcome: "found" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_card_fetch_seconds", { source: "github", outcome: "not_found" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_card_fetch_seconds", { source: "trello", outcome: "error" })?.count).toBe(1);
+  });
+
+  it("times a pinned run's checkpoint reads and writes", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    let stored: object | null = null;
+    const target = { loadCheckpoint: async () => stored, saveCheckpoint: async (p: object) => { if ("fail" in p) throw new Error("disk full"); stored = p; } };
+    timeCardCheckpoints(target, metrics);
+    await target.loadCheckpoint(); await target.saveCheckpoint({ completed_tasks: [] }); await target.loadCheckpoint();
+    await expect(target.saveCheckpoint({ fail: true })).rejects.toThrow("disk full");
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_run_card_checkpoint_seconds", { op: "read", outcome: "none" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_card_checkpoint_seconds", { op: "read", outcome: "found" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_card_checkpoint_seconds", { op: "write", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_run_card_checkpoint_seconds", { op: "write", outcome: "error" })?.count).toBe(1);
+  });
+});
+```
+
+Append to `packages/cli/tests/room-mcp-process.test.ts` (add `readdirSync` and `readFileSync` to its `node:fs` import):
+
+```ts
+it("writes its tool metrics to <runId>.room-mcp.<pid>.jsonl in SWARM_METRICS_DIR, and nothing but MCP to stdout", () => {
+  const dir = mkdtempSync(join(tmpdir(), "swarm-room-metrics-"));
+  const input = INIT + JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n"
+    + JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "who", arguments: {} } }) + "\n";
+  const r = run({ ...ENV, SWARM_METRICS_DIR: dir, SWARM_RUN_ID: "run-project-a-abc123" }, input);
+  expect(r.status).toBe(0);
+  for (const line of r.stdout.split("\n").filter(Boolean)) expect(JSON.parse(line).jsonrpc).toBe("2.0");
+  const files = readdirSync(dir);
+  expect(files).toEqual([expect.stringMatching(/^run-project-a-abc123\.room-mcp\.\d+\.jsonl$/)]);
+  const records = readFileSync(join(dir, files[0]!), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  expect(records.find((x) => x.r === "span" && x.name === "swarm_agent_room_tool_seconds"))
+    .toMatchObject({ outcome: "unreachable", labels: { tool: "who", process: "room-mcp", run_id: "run-project-a-abc123" } });
+  const snap = records.findLast((x) => x.r === "snap");
+  expect(snap.gauges.some((g: { name: string; labels: Record<string, string> }) => g.name === "swarm_process_rss_bytes" && g.labels.process === "room-mcp")).toBe(true);
+}, 60_000);
+```
+
+(`ENV` points `SWARM_OS_URL` at a port nothing listens on, so `who` is `unreachable`.)
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Run: `cd packages/types && npx vitest run tests/suspendable-timer.test.ts`; `cd packages/cli && npx vitest run src/cli/os-attach-metrics.test.ts src/cli/room-metrics.test.ts tests/room-mcp-process.test.ts`
+Expected: FAIL. The predicate is called without a tick (`ticks` is `[undefined, undefined, undefined]`); `suspendedPredicate`, `fetchPinnedItem`, `timeCardCheckpoints` and `ROOM_MCP_METRICS_ENV` are not exported; `brain.metricsPosts` is undefined; no `swarm_run_*` histogram is in any snapshot; `SWARM_METRICS_DIR` stays empty.
+
+- [ ] **Step 3: Implement**
+
+1. Append the block above to `OS_METRICS`, add the dependency to `packages/cli/package.json` when absent, and run `pnpm install && pnpm --filter @mnmal-ai/swarm-metrics build`.
+2. `os-protocol.ts`: the constant and the body type. `suspendable-timer.ts`: call `suspended(tickMs)`; existing callers that pass `() => boolean` still type-check. `pnpm --filter @mnmal-ai/swarm-types build`.
+3. `question-gate.ts`: the gate starts a `swarm_run_question_gate_open_seconds` span on its closed-to-open transition and ends it on open-to-closed. `suspendedPredicate` returns `gate.isOpen()` and, when open and given a `tickMs`, `metrics.inc("swarm_run_timer_suspended_seconds_total", { timer }, tickMs / 1000)`. `bindToGate` notes `gate.openMs()` when it pauses the target and adds `(gate.openMs() - noted) / 1000` when it resumes it, or at unbind while paused.
+4. `room-client.ts`: `brainCallOutcome`, `ROOM_MCP_METRICS_ENV`, `roomMcpMetricsFromEnv`. `RoomClient`'s private request helper wraps every call in a `swarm_run_room_request_seconds` span with the route word and ends it with `brainCallOutcome`. `askHuman` opens a `swarm_run_question_wait_seconds` span with its `asker` before the first post, and ends it on return: `answered` for an answer from `human` or `cos`, `proceeded` for a proceeded question or an answer from anyone else, `stopped` for every give-up (post retries exhausted, ten minutes unreachable, or 401, 403 or 404 on a poll).
+5. `room-mcp.ts`: each tool handler runs inside a `swarm_agent_room_tool_seconds` span, ended `ok`, `brainCallOutcome(err.status)` for a `RoomApiError` (`unreachable` when its status is null), or `error` for anything else; `ask_human` passes `{ ...deps, asker: "agent" }`. `runRoomMcp(env)`, when `roomMcpMetricsFromEnv(env)` gives `{ dir, runId }`: `sink = new JsonlMetricsSink(dir, { file: () => \`${runId}.room-mcp.${process.pid}.jsonl\`, retainDays: Infinity, onError: (e) => process.stderr.write(\`swarm room-mcp: metrics: ${e.message}\n\`) })` (the run's own sink owns the directory's retention), `registry = new MetricsRegistry({ sink, onWarn: (m) => process.stderr.write(\`swarm room-mcp: ${m}\n\`) })`, `defineAll(registry)`, `metrics = registry.with({ process: "room-mcp", run_id: runId })`, `registry.startSnapshots(60_000)` and `startProcessSampler(metrics)`; it hands `metrics` to the `RoomClient` and to `createRoomMcpServer`. Nothing it records reaches stdout. On close it waits up to 2 s for tool calls still running (each handler is tracked), then stops the sampler and the snapshots, calls `registry.writeSnapshot()` and `await sink.close()`, and resolves 0. Without the two variables it runs with `noopMetrics`, as before.
+6. `os-attach.ts`:
+   - The private POST helper runs every request inside a `swarm_run_os_request_seconds` span with its route word and ends it with `brainCallOutcome(status, timedOut)`.
+   - `attach()` opens `swarm_run_os_attach_seconds` and ends it `attached`, `refused`, or `closed` when `exit()` comes first.
+   - The outage line opens a `swarm_run_os_outage_seconds` span and `Swarm OS reachable again.` ends it.
+   - `openEventStream`'s `onOpen` increments `swarm_run_os_stream_connects_total` with `kind: "first"` the first time and `"reconnect"` after.
+   - Each `command` event opens a `swarm_run_os_command_seconds` span with `command` = `argv[0]` when `parseInstanceCommand` accepts it, else `unknown`; the delivery loop ends it `ok` after the handler returns, `error` when the handler throws (the error is logged; the run goes on), `ignored` for an unknown command. Commands queued before `onCommand` keep their spans open until delivered.
+   - `forward()` stores `{ event, seenAt: monoNow() }` per buffered event and sets `swarm_run_os_queued_events` on every push, drop and accepted batch. Past `OS_EVENT_BUFFER_MAX` it increments `swarm_run_os_events_dropped_total { reason: "buffer_full" }` per event dropped, and after a refusal `{ reason: "refused" }` per event seen. On a 2xx it observes `swarm_run_os_batch_events` (the batch's length) and `swarm_run_os_event_lag_seconds` (`(monoNow() - seenAt) / 1000` for each real event).
+   - The forward: when `snapshot` is given, an interval of `metricsMs` started with the heartbeat after attach (`unref`'d, cleared by `exit()`) posts `{ snapshot: { ...snapshot(), defs: [] } }` to `metrics` (the brain holds the same catalogue, which keeps the body well under plan 03's `MAX_BODY_BYTES`), observing the body's `Buffer.byteLength` in `swarm_run_os_forward_bytes`. A 404 on this route stops the forward only, with one line, `Swarm OS does not keep run metrics (404); the run stops forwarding them.`; 401 and 403 are a refusal as on every route; any other 4xx drops that one forward. One forward is in flight at a time. `exit()` flushes the events, waits for a forward in flight, forwards once more, then posts `exit`, all inside `exitTimeoutMs`.
+   - `ask()` builds its `RoomClient` with `{ metrics }` and calls `askHuman` with `{ metrics, asker: "run" }`.
+   - `roomServerEntry(session, self, files)` appends `SWARM_METRICS_DIR` and `SWARM_RUN_ID` to the env when `files` is given; `roomSessionMcp` and `withOsRoles` pass `files` through, and `withOsRoles` sets each role's `timersSuspended` to `suspendedPredicate(gate, "query_timeout", metrics)`.
+7. `card-pin.ts`: `fetchPinnedItem` runs `source.fetchItem(cardId)` inside a `swarm_run_card_fetch_seconds` span (`found`, `not_found` for `null`, `error` before it rethrows). `timeCardCheckpoints` binds the two original methods and puts timed ones on `target`: `swarm_run_card_checkpoint_seconds { op: "read" }` ending `found` or `none`, and `{ op: "write" }` ending `ok` or `error` (rethrowing).
+8. `fake-brain.ts`: the `metrics` route and `metricsPosts`.
+9. `run.ts`, every edit behind `pinnedCard` or `attachment`, so a plain run is unchanged:
+   - Section 3: `pinFetchedItem(await fetchPinnedItem(githubSource, pinnedCard, "github", runMetrics), …)`, and the same with `trelloSource` and `"trello"`.
+   - After the `Orchestrator` is built: `if (pinnedGoalId) timeCardCheckpoints(orchestrator, runMetrics)`.
+   - Task 11's attachment: `new OsAttachment({ ...osArgs, log, metrics: runMetrics, snapshot: () => runMetrics.snapshot() })`, and `questionGate = new QuestionGate(undefined, runMetrics)`.
+   - Task 12's wiring: `withOsRoles(c, attachment, questionGate, runMetrics, { dir: runMetricsDir, runId })`; `heartbeatSuspended: suspendedPredicate(questionGate, "orchestrator", runMetrics)`; both wedge watchers bind with `bindToGate(questionGate, toolWedgeWatcher, { metrics: runMetrics, timer: "wedge_watcher" })`.
+
+- [ ] **Step 4: Run the tests to see them pass, then everything**
+
+Run: `pnpm --filter @mnmal-ai/swarm-metrics build && cd packages/types && npx vitest run`, then `pnpm turbo build --filter=@mnmal-ai/swarm-cli^... && cd packages/cli && npx vitest run src/cli/os-attach-metrics.test.ts src/cli/room-metrics.test.ts tests/room-mcp-process.test.ts && npx vitest run`, then `scripts/verify-anonymous.sh` (with `--generic-only` on a machine without the private pattern file)
+Expected: PASS, all green, including Tasks 9 to 12's tests unchanged; the verifier exits 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/metrics/src/catalogue/os.ts packages/types/src/os-protocol.ts packages/types/src/suspendable-timer.ts packages/types/tests/suspendable-timer.test.ts \
+  packages/cli/src/cli/os-attach.ts packages/cli/src/cli/room-client.ts packages/cli/src/cli/room-mcp.ts packages/cli/src/cli/question-gate.ts packages/cli/src/cli/card-pin.ts \
+  packages/cli/src/cli/__fixtures__/fake-brain.ts packages/cli/src/cli/run.ts packages/cli/src/cli/os-attach-metrics.test.ts packages/cli/src/cli/room-metrics.test.ts \
+  packages/cli/tests/room-mcp-process.test.ts packages/cli/package.json pnpm-lock.yaml
+git -c commit.gpgsign=false commit -m "feat(run): measure the attachment, the room tools, questions, --card fetches and checkpoints, and forward the run's metrics"
 ```

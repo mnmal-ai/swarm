@@ -22,9 +22,10 @@
 | 06 | `06-chief-of-staff.md` | os | the chief-of-staff agent (Agent SDK session with the command set as tools), memory, standing orders, readiness check, act / `ask_first`, system prompts from files, provenance envelope, injection corpus tests | 04, 05 |
 | 07 | `07-dashboard-web.md` | os-web, os | the PWA: passkey login, device enrolment, chat with the chief of staff, channels, instances and resources, command bar, push subscription, service worker; embedding into the binary | 03, 05 |
 | 08 | `08-tui-cli.md` | cli, os | `swarm top` TUI, `swarm os register\|unregister\|dispatch\|hold\|override\|retry\|pause\|resume\|say\|top`, and the CLI-as-functions refactor that makes `merge`, `sync`, `db`, `substrate`, `skill`, `mcp`, `logs`, `upgrade` callable from the command registry | 03, 05 |
+| 10 | `10-metrics.md` | metrics (new), cli, substrate, worker-backends, orchestrator, task-backends, core | `@mnmal-ai/swarm-metrics` (registry, spans, JSON-lines sink, read and analysis side, process sampler, the catalogue), every `swarm run` phase and choke point instrumented, the end-of-run block, `swarm metrics`, the run dashboard's Performance panel | nothing (runs first) |
 | 09 | `09-security-resilience.md` | os, tests/integration | the identity-compromise controls end to end (limits on disk, step-up for standing commands, device enrolment approval, session revocation, tripwires, lockdown), the red-team corpus, the kill tests (brain, Substrate, instance), the first-proof acceptance script | all |
 
-Order of execution: 02, then 03; then 01, 04 and 05 in parallel; then 06, 07, 08 in parallel; 09 last. A plan never edits a file another plan owns (see **File ownership**).
+Order of execution: 10 first (added 2026-10-25 for the owner's metrics requirement), then 02, then 03; then 01, 04 and 05 in parallel; then 06, 07, 08 in parallel; 09 last. Plans run one at a time in this order (02, 03, 01, 04, 05, 06, 07, 08, 09), so "in parallel" means only that they do not depend on each other; plan 08's metrics task relies on client rows declared by plan 07's. Each of plans 01 to 09 ends with a metrics task that records its catalogue rows and wires its surfaces (see **Metrics**). A plan never edits a file another plan owns (see **File ownership**).
 
 ## Global Constraints
 
@@ -41,6 +42,7 @@ Copied from the spec and the repository's conventions. Every task's requirements
 - **Anonymity of the tree:** no personal names, client names, hostnames or home-directory paths in code, tests, fixtures or docs. Examples use `board-a`, `project-a`, `owner`, `/path/to/project`.
 - **No new GitHub workflows and no trigger changes.** The existing `ci.yml` runs `turbo lint`, `turbo test` and `turbo build` for every workspace package; new packages join by existing.
 - **Package conventions:** `packages/os` and `packages/os-web` are `"type": "module"`, `"version": "1.0.0-alpha.0"`, `"license": "Apache-2.0"`, depend on siblings with `"workspace:*"`, extend `../../tsconfig.base.json`, test with `vitest run`, build with `tsc` (os) or `vite build` (os-web).
+- **Everything is measured, locally.** Every boundary crossing, queue, timer, model call and phase records a metric on `@mnmal-ai/swarm-metrics` (plan 10), declared in `packages/metrics/src/catalogue/`, and the owner can read every metric from the dashboard, the TUI, the CLI and the chat. Metrics never leave the machine and are never in currency (see **Metrics**).
 - **Secrets never enter rooms or logs.** `redactSecrets(text)` from `packages/os/src/messaging/redact.ts` (plan 05) runs on every message body before storage; it reuses the patterns `swarm run`'s `.gitignore` seeding names (`.env`, keys, tokens) plus `sk-ant-`, `ghp_`, `github_pat_`, `xoxb-`, and `Bearer ` prefixes.
 
 ## Review Focus
@@ -66,6 +68,8 @@ Input classes the spec implies but no single task's tests exercise, most likely 
 | `packages/os-web/*`, `packages/os/src/api/static.ts`, `packages/os/src/api/web-embed.ts` | 07 |
 | `packages/os/src/tui/*`, `packages/cli/src/cli/top.ts`, `packages/cli/src/cli/os-commands.ts`, `packages/cli/src/cli/as-function/*` | 08 |
 | `packages/os/src/security/*`, `tests/integration/os-*.test.ts`, `scripts/os-first-proof.sh` | 09 |
+| `packages/metrics/*` (except `src/catalogue/os.ts`), the instrumentation edits in `packages/substrate`, `packages/worker-backends`, `packages/orchestrator`, `packages/task-backends`, `packages/core` and the run-side of `packages/cli` (`metrics.ts`, the run dashboard's Performance panel) | 10 |
+| `packages/metrics/src/catalogue/os.ts` | 01 to 09, append-only, one block per plan marked with the plan number |
 
 `packages/os/src/index.ts` re-exports each module's public surface; each plan adds its own export lines to it (append-only, one block per plan, marked with the plan number).
 
@@ -305,7 +309,7 @@ Command names and kinds (fixed here; plan 05 registers the operating and query s
 
 | name | kind | from plan |
 |------|------|-----------|
-| `top`, `rooms`, `instances`, `why <board> <card>`, `help` | query | 05 |
+| `top`, `rooms`, `instances`, `why <board> <card>`, `help`, `metrics [area]` | query | 05 |
 | `dispatch <board> <card>`, `hold <board> <card> [reason]`, `override min_cards <board>`, `pause board <board>`, `resume board <board>`, `pause run <instance>`, `resume run <instance>`, `retry run <instance> [--fresh]`, `stop run <instance> [--now]`, `answer <question> <text>`, `say <room> <text>` | operating | 04/05 |
 | `register …`, `unregister <registration>`, `set ask_first <registration> on\|off`, `set limits <registration> …`, `devices revoke <device>`, `devices approve <enrolment>`, `lockdown`, `lockdown release`, `db reset`, `substrate stop`, `upgrade`, `merge <goal>`, `uninstall` | standing | 03/05/08 |
 | `sync`, `logs …`, `skill …`, `mcp …`, `substrate status`, `doctor` | operating (CLI-backed) | 08 |
@@ -341,6 +345,69 @@ export class Lockdown { engage(by: Actor): Promise<void>; release(by: Actor & { 
 ### Test doubles (shared, plan 02 and 04 create them; everyone uses them)
 
 `packages/os/src/testing/index.ts` exports `MemoryOsStore`, `FakeEventHub` (plan 03; records published events and lets a test attach a fake actor), `FakeLauncher` (records specs; `status` scripted), `FakeBoardClient` (cards set by the test; `emit(ref)` simulates a webhook), `FakeClock` (`now()`, `advance(ms)`), `FakePush` (records sends), `FakeSdk` (scripted chief-of-staff turns and tool calls), `makeConfig(overrides)`. Plan 05's `Messaging` tests, plan 06's chief-of-staff tests and plan 09's red-team tests run entirely on these; the only tests that touch Postgres or the Agent SDK are in `tests/integration/os-*.test.ts`, gated by `SWARM_SDK_E2E=1`.
+
+### Metrics (decided 2026-10-25): everything measured, locally
+
+The owner's requirement, from the plan approval: every thing that can be tracked as a metric is available for them to see, so they can find performance bottlenecks in every possible place. So every I/O call, queue, loop, model call, external call and phase in `swarm run` and in the brain records a metric, and the owner can read all of them from the run dashboard, the brain's dashboard, the TUI, the CLI and the chat.
+
+Metrics stay on the machine that records them. Nothing uploads them; the opt-in telemetry upload in `packages/telemetry` never carries them; the brain's Prometheus text is served only to authenticated callers.
+
+**Library (plan 10).** `packages/metrics`, published name `@mnmal-ai/swarm-metrics`, zero runtime dependencies (node builtins only), importable from every other package without a cycle.
+
+```ts
+// packages/metrics/src/types.ts
+export type Labels = Readonly<Record<string, string>>;
+export type MetricKind = "counter" | "gauge" | "histogram";
+export type MetricUnit = "seconds" | "bytes" | "count" | "tokens" | "ratio";
+export interface MetricDef { name: string; kind: MetricKind; unit: MetricUnit; help: string; labels: readonly string[]; buckets?: readonly number[] }
+export type SpanOutcome = "ok" | "error" | "cancelled" | "timeout" | (string & {});
+export interface Span { readonly id: string; readonly name: string; end(outcome?: SpanOutcome, labels?: Labels): number /* seconds */ }
+export interface Metrics {
+  define(defs: readonly MetricDef[]): void;                          // idempotent; a second, different def for a name throws
+  inc(name: string, labels?: Labels, by?: number): void;             // counter
+  set(name: string, value: number, labels?: Labels): void;           // gauge
+  observe(name: string, value: number, labels?: Labels): void;       // histogram
+  span(name: string, labels?: Labels, parent?: Span | string): Span; // histogram `name` in seconds + a span record with id and parent
+  time<T>(name: string, labels: Labels, fn: (span: Span) => Promise<T> | T, parent?: Span | string): Promise<T>; // span around fn; outcome "ok" or "error" (rethrows)
+  with(labels: Labels): Metrics;                                     // the same registry with base labels merged into every record
+}
+export const noopMetrics: Metrics;                                   // for callers that were not handed a registry
+```
+
+The exact surface is the **Interfaces** block of plan 10, Task 1 (and Tasks 2 to 4 for the sink, the read side and the sampler); this summary defers to it. `MetricsRegistry implements Metrics` (constructor `{ clock?: MetricsClock; sink?: MetricsSink; maxSeriesPerMetric?: number /* 2000 */; reservoirSize?: number /* 1024 */; strict?: boolean }`; tests use `testRegistry(defs)` from `@mnmal-ai/swarm-metrics/testing`, which is strict on a `FakeMetricsClock`) keeps every series in memory: counters and gauges exactly, histograms as count, sum, min, max, fixed buckets and a reservoir of the last `reservoirSize` values for p50, p90, p99. A label set past `maxSeriesPerMetric` folds into the single series `{ overflow: "true" }` and counts `swarm_metrics_series_dropped_total`. The labels `run_id`, `process` and `overflow` are accepted on every metric without being declared. An undefined name throws when `strict` (tests) and is recorded as an untyped series with one `warn` otherwise. `snapshot(): MetricsSnapshot` and `toPrometheus(): string` read it.
+
+`JsonlMetricsSink(dir, { file: (date) => string; retainDays?: 14; maxBytesPerDay?: 268435456; flushMs?: 1000 })` appends records as JSON lines: `{ "r": "span", "name", "id", "parent", "start", "dur", "outcome", "labels" }` for spans, `{ "r": "obs", "name", "v", "labels", "t" }` for other histogram observations, and every 60 s `{ "r": "snap", "t", "counters": [...], "gauges": [...] }`. Past `maxBytesPerDay` it keeps every span and snapshot and writes one histogram observation in ten with `"sampled": 10`. It never throws into the caller: write errors count `swarm_metrics_sink_errors_total` and log once.
+
+`readMetrics(dir, { since?, until?, names? })`, `aggregate(records) → MetricsSnapshot`, `topSinks(snapshot, n) → Array<{ name, labels, count, totalSeconds, p50, p99 }>` (histograms in seconds, ranked by total time spent), `waterfall(records, rootId) → SpanTree` and `formatSummary(snapshot)` are the read side every surface uses.
+
+`startProcessSampler(metrics, { intervalMs?: 5000, diskPaths?: string[] }) → () => void` records, from node builtins only: event-loop delay p50, p99 and max (`perf_hooks.monitorEventLoopDelay`), heap used and total, RSS, external memory, CPU user and system seconds, GC pause seconds by kind (`PerformanceObserver` on `gc`), 1-minute load average, free system memory, and free bytes for each disk path (`fs.statfs`).
+
+**Names.** `swarm_<area>_<thing>_<unit>`: counters end `_total`, durations are histograms ending `_seconds`, sizes end `_bytes`. Areas: `run`, `agent`, `substrate`, `git`, `gh`, `tasks`, `merge`, `process`, `metrics`, and `os_<module>` for the brain (`os_store`, `os_journal`, `os_http`, `os_sse`, `os_auth`, `os_brain`, `os_ingress`, `os_dispatch`, `os_launcher`, `os_instance`, `os_messaging`, `os_push`, `os_command`, `os_cos`, `os_security`, `os_client`). Label values are bounded sets (route patterns, never raw paths; board ids, never card titles; tool names, never arguments). Ids that are unbounded (run, card, instance, session) go on span records, not on histogram series; a run's file is the run, so its series carry no `run_id`.
+
+**Where records land.**
+- `swarm run`: `<swarm dir>/metrics/<runId>.jsonl` (the `.swarm/.gitignore` template ignores `metrics/`).
+- The brain: `<os_home>/metrics/<YYYY-MM-DD>.jsonl`.
+- An instance (a `swarm run --os`) writes its own file as above and also forwards its snapshot to the brain (below), so the brain can show every run's numbers without reading the run's disk.
+
+**How the owner sees them.**
+
+| Surface | What it shows | Plan |
+|---|---|---|
+| End of every `swarm run` | one block: wall time split by phase, agent model time against tool time, top five time sinks, and tokens by role (swarm shows no currency) | 10 |
+| `swarm metrics [--run <id> \| --last] [--since <dur>] [--top <n>] [--waterfall] [--json]` | the same from the files, for any past run or window | 10 |
+| Run dashboard, Performance panel | live snapshot of the run's registry, top sinks, the phase waterfall | 10 |
+| Brain `GET /api/metrics?since&names&format=json\|prometheus` | the brain's registry, plus every instance's latest forwarded snapshot under `instances` | 03 |
+| Brain SSE `metrics` event every 5 s | a compact snapshot (top sinks, process gauges, instance summaries); sent without an `id`, never stored in the ring buffer, never replayed | 03 |
+| `POST /api/instances/:id/metrics { snapshot }` | an instance forwards its snapshot every 15 s and at exit | 01 (caller), 04 (route) |
+| `POST /api/metrics/client { records }` | the dashboard and the TUI report their own timings (stream connect, event-to-render, API calls, frame time) under area `os_client` | 03 (route), 07 and 08 (callers) |
+| Dashboard, Performance view | brain and instance top sinks, latency tables, process gauges, card-seen-to-dispatch latency | 07 |
+| TUI, `m` panel | the same in text | 08 |
+| `swarm os metrics [--top <n>] [--json] [--prometheus]` | the brain's snapshot from the terminal | 08 |
+| Chat command `metrics [area]` | a query command (read-only, no step-up) that posts a formatted summary into the room | 05 |
+
+**Rule for every task.** Code a task adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes a `Metrics` handle (constructor option `metrics?: Metrics`, default `noopMetrics`, or `BrainContext.metrics` in the brain; on the run side, existing choke points read `processMetrics()` instead) and records the catalogue rows its plan's metrics task names. Each plan's metrics task adds the rows, wires the handle, and pins them with tests on a `MetricsRegistry` with `strict: true` and a fake clock.
+
+**Why files, not Substrate entities.** The repository's rule "telemetry entities, not JSONL" covers telemetry events (`SessionEvent`, `TranscriptEntry`, `OversightChain`), and they stay entities. Metrics are a different thing: the Substrate store is one of the systems being measured, so its own latency and outages must be recorded somewhere that does not depend on it, and a metric write must never add load or a failure mode to the path it measures. Hence local JSON lines, owned by the process that records them. The repository's other rule holds too: swarm computes, stores and shows no currency, so no metric is in dollars; model usage is measured in tokens.
 
 ### Logging
 
@@ -411,3 +478,13 @@ The plans were written in parallel against the contracts above; their reports ad
 - Plan 07 adds `scripts/gen-web-manifest.mjs`, the generated embed manifest, a `prebuild` in `packages/os/package.json`, one `await registerStatic(api)` line in plan 03's composition root, and `.gitignore` entries.
 - Plan 08 adds `packages/os/src/api/cli-login.ts`, `packages/os/src/commands/{argv-args,registrations}.ts`, `packages/cli/src/cli/sync.ts` (sync moves out of `main.ts`), and one guard line in `packages/cli/src/cli/os.ts`.
 
+**Metrics (from the plans' metrics tasks, 2026-10-25)**
+- Plan 10 runs first and owns `packages/metrics` except `src/catalogue/os.ts`, where plans 01 to 09 each append after their own `// plan 0N` line.
+- `BrainContext` gains `metrics` (the brain's registry), `metricsSink` (its `JsonlMetricsSink`) and `brainMetrics` (collectors for gauges); `BrainServices` gains `instanceMetrics: InstanceMetricsPort`, which plan 04's dispatch module assigns (`InstanceMetricsStore`) and plan 03's `GET /api/metrics` reads.
+- Plan 03 passes `ctx.metrics` to plan 02's `SubstrateOsStore`, `Journal`, `journaledStore` and `ensureOsStack`, to plan 06's `CosWiringDeps` and to plan 08's `CliLogins`; plan 05's `CommandContext.metrics` is optional.
+- The SSE `metrics` event carries no `id`, is never in the ring buffer and is never replayed; clients absorb it by replacing state and never require or de-duplicate by an id for it.
+- `GET /api/metrics` → `{ brain, instances }`; `POST /api/metrics/client` accepts a human session or the host, at most 500 `obs` records named `swarm_os_client_…`, and the brain sets the `client` label (`web`, `tui`). Instance snapshots are forwarded with `defs: []`; clients read units from the brain's `defs` or the name suffix.
+- JSON turns the last histogram bucket bound `Infinity` into `null`; every reader passes received snapshots through `reviveSnapshot` (plan 10, Task 3).
+- `metrics [area]` is a query command (no step-up), added to plan 09's `QUERY` list.
+- Plan 09's metrics task (Task 12) runs before the first proof (Task 13), so the person running the proof sees the latencies it prints.
+- Open for execution, predating the metrics work: plan 03 expects a messaging brain module and plan 05's Task 14 (`install.ts`) provides the mount; when plan 05 executes, rule on the name so `MODULE_ORDER`'s `messaging` entry resolves to it and receives `ctx.metrics`.

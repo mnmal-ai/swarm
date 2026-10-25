@@ -140,6 +140,15 @@ The messaging space is the operating system's bus, not an add-on.
 
 The launcher reports a `Resource` snapshot every heartbeat: CPU and memory in use and free, open Claude Code sessions, instances running, tokens spent this hour per project, Substrate connection pools per stack, dashboard ports in use. The brain keeps the latest and a short history. Limits live in the registration (per project) and in the brain's config (per machine). The TUI's top panel and the chat's `/top` reply are this snapshot, plus each instance's line: card, project, phase, current task, tokens, elapsed, last heartbeat.
 
+## Metrics: everything measured, locally
+
+Added 2026-10-25, from the owner's approval of the plans: every thing that can be tracked as a metric must be available to the owner, so they can understand performance bottlenecks in every possible place. So everything is measured, at least locally.
+
+- **What.** Every phase of `swarm run` (preflight, base sync, setup, stack boot, planning, each task, review, arbitration, merge queue, merge gate, push, drain); every agent session (wall time, model time, tool time per tool, turns, tokens by kind, rate-limit waits); every Substrate request, git and gh command, task-source call and spawned process; and in the brain every request, stream, store call, journal write, poll, webhook, policy check, dispatch, launch, heartbeat, message, push, question, command, step-up and chief-of-staff turn. The latency the first proof cares about, a card appearing to its instance starting, is its own metric. Each process also samples itself: event-loop delay, memory, CPU, garbage collection, load and free disk.
+- **Where.** Each process records into its own registry and appends to local JSON-lines files: a run to its swarm directory, the brain to its home. Nothing is uploaded, and the opt-in telemetry upload never carries metrics. Metrics are files rather than Substrate rows because the store is one of the things being measured, and its latency and outages must be recorded somewhere that does not depend on it.
+- **How the owner sees them.** At the end of every run, a block splitting wall time by phase, agent model time against tool time, the top time sinks and tokens by role. `swarm metrics` reads any past run or window. The run dashboard gains a Performance panel. The brain serves its registry and every instance's latest numbers at `/api/metrics` (JSON or Prometheus text, authenticated), streams a compact snapshot every five seconds, and the dashboard, the TUI, `swarm os metrics` and a `metrics` chat command show them. The dashboard and the TUI also report their own timings, so a slow screen is measured too.
+- **No money.** Swarm shows no currency anywhere, so model usage is measured in tokens.
+
 ## Clients
 
 - **Dashboard (web app).** The chief of staff's chat in the middle, the resource line and active instances at the top, every room down the side as channels (boards, live instances, past instances, direct), a command bar at the bottom with completion for the command set. Installs to a phone's home screen, receives push. Passkey login for humans; one owner is bootstrapped on first `swarm os init`.
@@ -232,3 +241,4 @@ Marked as mine, for the owner to check:
 - The brain has thin board clients of its own (Trello and GitHub APIs) rather than reusing the project-CLI task sources, because `swarm run` reads Trello only through a project's own CLI.
 - Limits live in a file on the host and nothing in the API can change them; standing commands need a code shown only on the host or a second device; prompts come from the repository, never the store.
 - Server-sent events down and HTTP up, instead of a WebSocket, so that every command is its own authenticated request and revocation is immediate; the per-run dashboard inside `swarm run` keeps its WebSocket as it is.
+- Metrics are local JSON-lines files per process with a zero-dependency registry of swarm's own, rather than Substrate rows or an OpenTelemetry stack, so measuring never depends on, or loads, the thing being measured, and the binary gains no dependencies. Prometheus text is offered for anyone who wants to graph them.

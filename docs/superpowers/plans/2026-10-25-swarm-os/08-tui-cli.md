@@ -34,6 +34,7 @@
   - main.ts, `db.ts`, `skill.ts` and `uninstall.ts`, exactly where Tasks 8, 10, 12 and 13 say
 - Tests for `packages/os` live in `packages/os/tests/` and import sources by relative path. Tests for `packages/cli` live in `packages/cli/tests/` and import `@mnmal-ai/swarm-os`, so build it first with `pnpm --filter @mnmal-ai/swarm-os build`.
 - **Task gate**, the last step of every task: `pnpm turbo build --filter=@mnmal-ai/swarm-os --filter=@mnmal-ai/swarm-cli && cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run && cd ../cli && env -u ANTHROPIC_API_KEY npx vitest run`. Expected: both builds exit 0 and every test file passes.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 15 records the rows.
 
 ## Review Focus
 
@@ -2997,6 +2998,650 @@ Expected: PASS (2 tests). Then run the task gate, and `pnpm -w build` as the pla
 ```bash
 git add packages/cli/src/cli/as-function/index.ts packages/cli/src/cli/os.ts packages/cli/tests/as-function-commands.test.ts
 git commit -m "feat(cli): hand the CLI-backed and registration commands to the brain at start"
+```
+
+---
+
+### Task 15: Metrics
+
+This task runs after plan 07's Task 13. That task's catalogue block declares the client rows the terminal shares with the dashboard: `swarm_os_client_api_seconds`, `swarm_os_client_stream_connect_seconds` and `swarm_os_client_event_render_seconds`. The TUI records them as client `tui`, so one name compares both clients.
+
+**Files:**
+- Create: `packages/os/src/tui/metrics.ts`, `packages/os/src/tui/metrics-view.ts`, `packages/os/tests/helpers/series.ts`
+- Modify: `packages/os/src/tui/client.ts` (timings, the `metrics` event, three calls), `state.ts` (the panel's slices and `load-metrics`), `keys.ts` (`m`), `render.ts` (the panel and its hint), `app.ts` (frame and lag timings, the reporter), `index.ts`
+- Modify: `packages/os/src/api/cli-login.ts` (`CliLoginDeps.metrics`), `packages/os/src/commands/registrations.ts` (the board lookup)
+- Modify: `packages/cli/src/cli/top.ts` (one registry for the run), `packages/cli/src/cli/os-commands.ts` (`swarm os metrics`), `packages/cli/src/cli/args.ts` (`json` and `prometheus` join `BOOLEAN_FLAGS` unless already there), `packages/cli/src/cli/as-function/types.ts`, `room.ts`, `define.ts`
+- Modify: `packages/cli/package.json` (`"@mnmal-ai/swarm-metrics": "workspace:*"`, only if plan 10 has not added it), `pnpm-lock.yaml`
+- Modify: `packages/metrics/src/catalogue/os.ts` (under its `// plan 08` line only, append-only)
+- Test: `packages/os/tests/tui/metrics.test.ts`, `packages/os/tests/api/cli-login-metrics.test.ts`, `packages/os/tests/commands/registrations-metrics.test.ts`, `packages/cli/tests/os-metrics.test.ts`
+
+**Interfaces:**
+- Consumes:
+  - From `@mnmal-ai/swarm-metrics` (plan 10): `Metrics`, `MetricsClock`, `MetricsRegistry`, `MetricsSink`, `MetricRecord`, `ObsRecord`, `MetricsSnapshot`, `SinkRow`, `GaugeSnapshot`, `noopMetrics`, `systemClock`, `topSinks`, `formatTopSinks`, `formatDuration`, `CONTAINER_METRICS`, `PROCESS_METRICS` and `OS_METRICS`. From `@mnmal-ai/swarm-metrics/testing`, `testRegistry`. `packages/os` depends on the library through plan 02's metrics task, and `packages/cli` through plan 10. The library is a zero-dependency workspace sibling, so the "no new dependency" constraint above still holds.
+  - Plan 03's routes and event, as given. `GET /api/metrics?since&names&format=json|prometheus` (human session or host) answers `{ brain: MetricsSnapshot; instances: Record<instanceId, { at; snapshot }> }`. A forwarded instance snapshot arrives with `defs: []`, so nothing here reads units or label order from an instance snapshot's `defs`. `POST /api/metrics/client { records: ObsRecord[] }` takes at most 500 records named `swarm_os_client_*`; the brain adds `client`. The SSE `metrics` event comes every 5 s as `{ at, top: SinkRow[] (10), process: GaugeSnapshot[], instances: Array<{ instanceId, top: SinkRow[] (3) }> }` with no `id:` line.
+  - Plan 07's Task 13 rows, above.
+  - `CommandContext.metrics?: Metrics`: plan 05's metrics task has the executor fill it from `BrainContext.metrics`. `cliBackedSpec`, `roomCommandIo` and `register` read it as `ctx.metrics ?? noopMetrics`.
+  - `CliLoginDeps.metrics`, which plan 03's `cli-login` module passes as `ctx.metrics`.
+  - The rows the `m` panel reads by name (`PERF_NAMES`, the same names as plan 07's): plan 03's `swarm_os_http_request_seconds`, plan 02's `swarm_os_store_op_seconds`, plan 04's `swarm_os_dispatch_card_seen_to_decision_seconds`, `swarm_os_dispatch_card_seen_to_dispatch_seconds` and `swarm_os_dispatch_card_seen_to_attach_seconds`, and plan 10's `swarm_run_phase_seconds` (label `phase`), `swarm_agent_tokens_total` (labels `role` and `kind`) and the `swarm_process_*` rows.
+  - Tasks 1 to 14.
+  - What records nothing of its own: `swarm os <command>`, `swarm os login` and `swarm os metrics` are one-shot processes, and plan 03's HTTP rows time their calls from the brain's side.
+- Produces:
+
+```ts
+// packages/os/src/tui/metrics.ts
+export const CLIENT_FLUSH_MS = 30_000;
+export const CLIENT_BATCH_MAX = 500;
+export const CLIENT_BUFFER_MAX = 2_000;
+export class ClientObsBuffer implements MetricsSink {
+  write(record: MetricRecord): void;       // keeps obs records named swarm_os_client_*; drops spans, snapshots and anything else; past CLIENT_BUFFER_MAX drops the oldest and counts it
+  flush(): Promise<void>;                  // no-op: the reporter drains the buffer
+  close(): Promise<void>;                  // no-op
+  take(max: number): ObsRecord[];          // removes and returns the oldest max
+  putBack(records: ObsRecord[]): void;     // back to the front, keeping the cap
+  readonly size: number;
+  readonly dropped: number;
+}
+export interface TuiMetrics { registry: MetricsRegistry; buffer: ClientObsBuffer }
+export function createTuiMetrics(opts?: { clock?: MetricsClock; strict?: boolean }): TuiMetrics;   // the registry's sink is the buffer; it defines OS_METRICS' swarm_os_client_* rows
+export class ClientMetricsReporter {
+  constructor(opts: { buffer: ClientObsBuffer; post(records: ObsRecord[]): Promise<void>; everyMs?: number });   // everyMs default CLIENT_FLUSH_MS
+  start(): void;                           // unref'd interval
+  flush(): Promise<void>;                  // batches of CLIENT_BATCH_MAX until the buffer is empty or a post fails; never rejects
+  stop(): Promise<void>;                   // clears the interval, then flush()
+  readonly lastError: string | null;       // "the brain refused client metrics (<status> <code>)" once the brain refuses; reporting then stops for the run
+}
+// packages/os/src/tui/metrics-view.ts
+export const PERF_NAMES: {
+  readonly http: "swarm_os_http_request_seconds";
+  readonly store: "swarm_os_store_op_seconds";
+  readonly cardSeen: readonly [
+    { readonly name: "swarm_os_dispatch_card_seen_to_decision_seconds"; readonly label: "decision" },
+    { readonly name: "swarm_os_dispatch_card_seen_to_dispatch_seconds"; readonly label: "dispatch" },
+    { readonly name: "swarm_os_dispatch_card_seen_to_attach_seconds"; readonly label: "instance attached" },
+  ];
+  readonly runPhase: "swarm_run_phase_seconds";
+  readonly agentTokens: "swarm_agent_tokens_total";
+};
+export type MetricsEventData = Extract<BrainEvent, { type: "metrics" }>;
+export interface MetricsView {
+  brain: MetricsSnapshot | null; brainAt: number | null; instances: Record<string, { at: number; snapshot: MetricsSnapshot }>;
+  live: MetricsEventData | null; liveInstances: Array<{ id: string; name: string }>;
+  client: MetricsSnapshot | null; reportError: string | null; error: string | null; top: number; timeZone: string;
+}
+export function metricsViewOf(state: TuiState): MetricsView;   // top 10; liveInstances from liveInstances(state), each named by its room, else <boardId>:<cardId>
+export function metricsPanelLines(view: MetricsView, width: number): string[];   // plain text, each line fit() to width
+export function formatBytes(bytes: number): string;            // "512 B", "12.0 KB", "1.2 MB", "3.4 GB" (powers of 1024)
+// packages/os/src/tui/client.ts (added)
+export interface BrainMetrics { brain: MetricsSnapshot; instances: Record<string, { at: number; snapshot: MetricsSnapshot }> }
+// BrainEvent gains { type: "metrics"; id: null; at: number; top: SinkRow[]; process: GaugeSnapshot[]; instances: Array<{ instanceId: string; top: SinkRow[] }> }
+// BrainClient's constructor options gain metrics?: Metrics and clock?: MetricsClock (default noopMetrics and systemClock); BrainClient gains:
+//   getMetrics(opts?: { since?: number; names?: string[] }): Promise<BrainMetrics>;   GET /api/metrics?format=json[&since=<epoch ms>][&names=<a,b>]
+//   getMetricsText(opts?: { since?: number; names?: string[] }): Promise<string>;     the same with format=prometheus, the body as text
+//   postClientMetrics(records: ObsRecord[]): Promise<void>;                           POST /api/metrics/client { records }; never timed itself
+// packages/os/src/tui/state.ts (added)
+// TuiState gains: metricsOpen: boolean; metricsScroll: number; brainMetrics: BrainMetrics | null; brainMetricsAt: number | null; metricsError: string | null;
+//                 metricsLive: MetricsEventData | null; clientMetrics: MetricsSnapshot | null; clientReportError: string | null   (initialTuiState: false, 0, then null)
+// TuiEffect gains { kind: "load-metrics" }
+export function applyMetrics(state: TuiState, body: BrainMetrics, at: number): TuiState;   // clears metricsError
+export function applyMetricsError(state: TuiState, message: string): TuiState;
+export function applyClientMetrics(state: TuiState, snapshot: MetricsSnapshot, reportError: string | null): TuiState;
+// packages/os/src/tui/render.ts: FOCUS_HINTS gains metrics: "m close  j/k scroll  r reload  q quit"
+// packages/os/src/tui/app.ts: RunTuiOptions gains metrics?: TuiMetrics and clock?: MetricsClock; BrainClientLike adds "getMetrics" | "postClientMetrics"
+// packages/os/src/api/cli-login.ts: CliLoginDeps gains metrics?: Metrics
+// packages/cli/src/cli/os-commands.ts (added)
+export const OS_METRICS_USAGE = "swarm os metrics [--top <n>] [--since <dur>] [--json | --prometheus]";
+export function parseSince(value: string): number | null;     // "90s", "15m", "2h", "7d" → milliseconds; anything else null
+export function runOsMetrics(flags: Record<string, string>, deps?: Partial<OsCommandDeps>): Promise<number>;
+// OsCommandDeps.client returns Pick<BrainClient, "listRooms" | "postCommand" | "getMetrics" | "getMetricsText">; OsCommandDeps gains now(): number (default Date.now)
+// packages/cli/src/cli/top.ts: TopDeps.makeClient becomes (c: BrainCredentials, metrics?: Metrics) => BrainClientLike
+// packages/cli/src/cli/as-function/types.ts
+export interface CliCommandDescriptor { name: string; summary: string; kind: "operating" | "standing"; project: "required" | "optional" | "none"; run(args: string[], io: CommandIo, metrics?: Metrics): Promise<CliRunResult> }
+// packages/os/tests/helpers/series.ts
+export function hist(m: MetricsRegistry, name: string, want?: Record<string, string>): { count: number; sum: number; max: number };   // summed over the matching series
+export function counter(m: MetricsRegistry, name: string, want?: Record<string, string>): number;
+export function gauge(m: MetricsRegistry, name: string, want?: Record<string, string>): number | undefined;
+```
+
+The rows. Plan 07's three shared rows, recorded here as client `tui`:
+
+| Name | Recorded in, for the TUI |
+|---|---|
+| `swarm_os_client_api_seconds` | `BrainClient`'s request helper: every call but `postClientMetrics`, labelled with the overview's route pattern, the method and the status class (`2xx` … `5xx`, `network`) |
+| `swarm_os_client_stream_connect_seconds` | `BrainClient.connect`: from `connect()`, or from the last `onError`, to `onOpen`; `kind` `first` or `reconnect` |
+| `swarm_os_client_event_render_seconds` | `runTui`: each event, from `onEvent` to the frame written after it; `type` is the event's type |
+
+This plan's own rows:
+
+| Name | Kind | Unit | Labels | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_client_frame_seconds` | histogram | seconds | `client`, `kind` (`full`, `diff`, `unchanged`) | `runTui`'s render: `renderFrame` through the write |
+| `swarm_os_command_cli_seconds` | histogram | seconds | `command` (a CLI-backed command's name), `outcome` (`ok`, `failed`, `refused`, `error`) | `cliBackedSpec(d).run`: span from the room-flag check to the formatted reply |
+| `swarm_os_command_cli_wait_seconds` | histogram | seconds | `command`, `outcome` (`ok`) | `defineCliCommand(def).run`: from the call to its captured run starting, which is the one-at-a-time queue in `withCapturedProcess` |
+| `swarm_os_command_cli_waiting` | gauge | count | | `defineCliCommand(def).run`: commands waiting for the capture, set on entry and when each starts |
+| `swarm_os_command_cli_preamble_seconds` | histogram | seconds | `command`, `needs` (`none`, `project`, `client`), `outcome` (`ok`, `error`) | `defineCliCommand(def).run`: span around `prepareProjectEnv` inside the capture |
+| `swarm_os_command_cli_prompt_seconds` | histogram | seconds | `outcome` (`answered`, `timeout`) | `roomCommandIo(ctx).prompt`: from the question's post to the answer or the timeout |
+| `swarm_os_command_cli_output_bytes` | histogram | bytes | `command` | `cliBackedSpec(d).run`: UTF-8 bytes of the captured stdout and stderr, before the cap |
+| `swarm_os_command_board_lookup_seconds` | histogram | seconds | `source` (`trello`), `status` (`2xx`, `4xx`, `5xx`, `network`), `outcome` (`ok`, `error`) | `register` in `registrations.ts`: span around the Trello board lookup |
+| `swarm_os_auth_cli_logins_pending` | gauge | count | | `CliLogins`: entries `pending` or `approved` and not expired, set after every `poll` and `approve` |
+| `swarm_os_auth_cli_login_polls_total` | counter | count | `outcome` (`pending`, `approved`, `consumed`, `expired`, `unknown`, `limit`, `bad_request`) | `CliLogins.poll`, by the reply it gives |
+| `swarm_os_auth_cli_login_approvals_total` | counter | count | `outcome` (`ok`, `forbidden`, `unknown`, `conflict`, `expired`) | `CliLogins.approve`, by the reply it gives |
+| `swarm_os_auth_cli_login_seconds` | histogram | seconds | `outcome` (`collected`, `expired`) | `CliLogins`: span from a nonce's first poll to the poll that collects its session, or to the first call that finds it expired |
+
+Appended to `OS_METRICS` in `packages/metrics/src/catalogue/os.ts`, under the `// plan 08` line:
+
+```ts
+  // swarm top also records plan 07's api, stream_connect and event_render rows, as client "tui".
+  { name: "swarm_os_client_frame_seconds", kind: "histogram", unit: "seconds", help: "swarm top: computing and writing one frame", labels: ["client", "kind"] },
+  { name: "swarm_os_command_cli_seconds", kind: "histogram", unit: "seconds", help: "A CLI-backed command run from a room, by command and outcome", labels: ["command", "outcome"] },
+  { name: "swarm_os_command_cli_wait_seconds", kind: "histogram", unit: "seconds", help: "A CLI-backed command waiting for the one-at-a-time capture", labels: ["command", "outcome"] },
+  { name: "swarm_os_command_cli_waiting", kind: "gauge", unit: "count", help: "CLI-backed commands waiting for the capture", labels: [] },
+  { name: "swarm_os_command_cli_preamble_seconds", kind: "histogram", unit: "seconds", help: "A CLI-backed command's project preamble: env, store bring-up, auto-sync", labels: ["command", "needs", "outcome"] },
+  { name: "swarm_os_command_cli_prompt_seconds", kind: "histogram", unit: "seconds", help: "A CLI-backed command's question in its room, until answered or timed out", labels: ["outcome"] },
+  { name: "swarm_os_command_cli_output_bytes", kind: "histogram", unit: "bytes", help: "Captured output of a CLI-backed command, before the cap", labels: ["command"] },
+  { name: "swarm_os_command_board_lookup_seconds", kind: "histogram", unit: "seconds", help: "register's lookup of a board on the board's API", labels: ["source", "status", "outcome"] },
+  { name: "swarm_os_auth_cli_logins_pending", kind: "gauge", unit: "count", help: "Terminal sign-ins waiting for approval or collection", labels: [] },
+  { name: "swarm_os_auth_cli_login_polls_total", kind: "counter", unit: "count", help: "Terminal sign-in polls, by the reply", labels: ["outcome"] },
+  { name: "swarm_os_auth_cli_login_approvals_total", kind: "counter", unit: "count", help: "Terminal sign-in approvals, by the reply", labels: ["outcome"] },
+  { name: "swarm_os_auth_cli_login_seconds", kind: "histogram", unit: "seconds", help: "A terminal sign-in, from its first poll to collection or expiry", labels: ["outcome"] },
+```
+
+**The `m` panel and `swarm os metrics`.** `metricsPanelLines(view, width)` returns these lines, each passed through `fit(line, width)`:
+
+1. ` Brain`, followed by `  <view.error>` when there is one, else `  as of <formatClock(brainAt, timeZone)>` when `brainAt` is set.
+2. `   top time sinks`, then each line of `formatTopSinks(rows)` with 5 spaces in front. `rows` is `view.live.top`, else `topSinks(view.brain, view.top)`. With none: `     (nothing timed yet)`.
+3. Three latency tables, headed `   HTTP by route` (`PERF_NAMES.http`), `   store by operation` (`PERF_NAMES.store`) and `   card seen to` (the three card-seen names). A row is `     ${fit(key, 32)}  p50 ${fitRight(formatDuration(p50), 7)}  p99 ${fitRight(formatDuration(p99), 7)}  n ${count}`, one per histogram series, largest `sum` first, at most 8. The `key` is, for the card-seen table, the name's `label`, followed by the series' label values. The values follow the order of the name's entry in `view.brain.defs`, sorted by label name when there is none, and leave out `process`, `run_id` and `overflow`. Parts are joined by single spaces. With no series: `     (none yet)`.
+4. ` Instances`, then a block for each of `view.liveInstances` that has a snapshot in `view.instances` or a row in `view.live.instances`:
+   - `   <name>`.
+   - `     phases  ` followed by `<phase> <formatDuration(seconds)> <whole percent>%` per phase, joined by two spaces. Seconds are summed over `swarm_run_phase_seconds` by `phase`, largest first. The line is left out without phases.
+   - The instance's top sinks: its row in `view.live.instances`, else `topSinks(snapshot, 3, { names: (n) => n.endsWith("_seconds") && !CONTAINER_METRICS.includes(n) })`. The first is `     top     <sinkLabel>  total <formatDuration(totalSeconds)>` and the rest are indented to the same column with 13 spaces. `sinkLabel` is the name, plus `{k=v,…}` over its non-base labels when there are any.
+   - `     tokens  ` followed by `<role> <compactTokens(input)> in / <compactTokens(output)> out` per role, joined by `; `, from `swarm_agent_tokens_total` kinds `input` and `output`. The line is left out without tokens.
+
+   With no block: `   (no live instance has reported yet)`.
+5. ` Process`, from `view.live.process`, else `view.brain.gauges`, with CPU from `view.brain.counters`. A missing value is `-`.
+   - `   event loop  p50 <d>  p99 <d>  max <d>`
+   - `   memory      heap <b>  rss <b>  system free <b>`
+   - `   cpu         load <x.xx>  user <d>  system <d>`
+   - `   disk free   <b>`, per disk, joined by two spaces
+6. Only when `view.client` is set: ` Client (this terminal)`, then one latency row per `swarm_os_client_*` histogram in it. The key is the name without `swarm_os_client_` and `_seconds`, then its label values in `view.client.defs` order. With none: `     (nothing measured yet)`. Last comes `   not reported to the brain: <reportError>` when `reportError` is set.
+
+`swarm os metrics` prints the same lines at width 100, each `trimEnd()`ed, from `{ brain, brainAt: now(), instances, live: null, liveInstances: <every key of instances, named by itself>, client: null, reportError: null, error: null, top: --top ?? 10, timeZone: <the local zone> }`. `--json` prints `JSON.stringify(body, null, 2)` instead, and `--prometheus` the text without its final newline.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// packages/os/tests/helpers/series.ts
+import type { MetricsRegistry } from "@mnmal-ai/swarm-metrics";
+
+type Want = Record<string, string>;
+const matches = (labels: Readonly<Record<string, string>>, want: Want) => Object.entries(want).every(([k, v]) => labels[k] === v);
+export function hist(m: MetricsRegistry, name: string, want: Want = {}) {
+  const hs = m.snapshot().histograms.filter((h) => h.name === name && matches(h.labels, want));
+  return { count: hs.reduce((n, h) => n + h.count, 0), sum: hs.reduce((n, h) => n + h.sum, 0), max: Math.max(0, ...hs.map((h) => h.max)) };
+}
+export function counter(m: MetricsRegistry, name: string, want: Want = {}): number {
+  return m.snapshot().counters.filter((c) => c.name === name && matches(c.labels, want)).reduce((n, c) => n + c.value, 0);
+}
+export function gauge(m: MetricsRegistry, name: string, want: Want = {}): number | undefined {
+  return m.snapshot().gauges.find((g) => g.name === name && matches(g.labels, want))?.value;
+}
+```
+
+```ts
+// packages/os/tests/tui/metrics.test.ts
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { OS_METRICS, PROCESS_METRICS, type ObsRecord } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { runTui, type BrainClientLike } from "../../src/tui/app.js";
+import { BrainClient, BrainHttpError, BrainUnreachableError, toBrainEvent, type BrainEvent, type ConnectionStatus } from "../../src/tui/client.js";
+import { reduceKey } from "../../src/tui/keys.js";
+import { ClientMetricsReporter, ClientObsBuffer, createTuiMetrics } from "../../src/tui/metrics.js";
+import { PERF_NAMES, metricsPanelLines, type MetricsView } from "../../src/tui/metrics-view.js";
+import { renderFrame } from "../../src/tui/render.js";
+import { applyClientMetrics, applyEvent, applyMetrics } from "../../src/tui/state.js";
+import { stripAnsi } from "../../src/tui/text.js";
+import { hist } from "../helpers/series.js";
+import { startFakeBrain, type FakeBrain } from "./fake-brain.js";
+import { INSTANCES, NOW, OWNER, RESOURCES, ROOMS, fixtureState, hello } from "./fixture.js";
+
+class FakeIn extends PassThrough { isTTY = true; setRawMode() { return this; } }
+class FakeOut extends EventEmitter { isTTY = true; columns = 80; rows = 24; write() { return true; } }
+let brain: FakeBrain | undefined;
+afterEach(async () => { await brain?.close(); brain = undefined; });
+
+function brainSnapshot() {
+  const { metrics } = testRegistry([
+    { name: PERF_NAMES.http, kind: "histogram", unit: "seconds", help: "h", labels: ["route", "method", "status"] },
+    { name: PERF_NAMES.cardSeen[1].name, kind: "histogram", unit: "seconds", help: "h", labels: [] },
+    ...PROCESS_METRICS,
+  ]);
+  for (const v of [0.012, 0.012, 0.04]) metrics.observe(PERF_NAMES.http, v, { route: "/api/rooms", method: "GET", status: "2xx" });
+  metrics.observe(PERF_NAMES.cardSeen[1].name, 3.2);
+  for (const [stat, v] of [["p50", 0.0004], ["p99", 0.008], ["max", 0.04]] as const) metrics.set("swarm_process_event_loop_delay_seconds", v, { stat });
+  return metrics.snapshot();
+}
+function instanceSnapshot() {
+  const { metrics } = testRegistry([
+    { name: PERF_NAMES.runPhase, kind: "histogram", unit: "seconds", help: "h", labels: ["phase", "outcome"] },
+    { name: PERF_NAMES.agentTokens, kind: "counter", unit: "tokens", help: "h", labels: ["role", "backend", "kind"] },
+  ]);
+  metrics.observe(PERF_NAMES.runPhase, 300, { phase: "agents", outcome: "ok" });
+  metrics.observe(PERF_NAMES.runPhase, 100, { phase: "setup", outcome: "ok" });
+  metrics.inc(PERF_NAMES.agentTokens, { role: "worker", backend: "claude-code", kind: "input" }, 1_234_567);
+  metrics.inc(PERF_NAMES.agentTokens, { role: "worker", backend: "claude-code", kind: "output" }, 40_000);
+  return { ...metrics.snapshot(), defs: [] };   // forwarded snapshots carry no defs
+}
+const VIEW: MetricsView = {
+  brain: brainSnapshot(), brainAt: NOW, instances: { "inst-42": { at: NOW, snapshot: instanceSnapshot() } }, live: null,
+  liveInstances: [{ id: "inst-42", name: "project-a #42" }], client: null, reportError: null, error: null, top: 10, timeZone: "UTC",
+};
+
+describe("the catalogue", () => {
+  it("declares every row plan 08 records", () => {
+    const names = new Set(OS_METRICS.map((d) => d.name));
+    for (const n of [
+      "swarm_os_client_frame_seconds", "swarm_os_client_api_seconds", "swarm_os_client_stream_connect_seconds", "swarm_os_client_event_render_seconds",
+      "swarm_os_command_cli_seconds", "swarm_os_command_cli_wait_seconds", "swarm_os_command_cli_waiting", "swarm_os_command_cli_preamble_seconds",
+      "swarm_os_command_cli_prompt_seconds", "swarm_os_command_cli_output_bytes", "swarm_os_command_board_lookup_seconds",
+      "swarm_os_auth_cli_logins_pending", "swarm_os_auth_cli_login_polls_total", "swarm_os_auth_cli_login_approvals_total", "swarm_os_auth_cli_login_seconds",
+    ]) expect(names.has(n), n).toBe(true);
+  });
+});
+
+describe("metricsPanelLines", () => {
+  it("draws the brain's latencies, each live instance and the process, and no client group without one", () => {
+    const lines = metricsPanelLines(VIEW, 100).map((l) => l.trimEnd());
+    expect(lines).toEqual(expect.arrayContaining([
+      " Brain  as of 09:00",
+      "   HTTP by route",
+      `     ${"/api/rooms GET 2xx".padEnd(32)}  p50   12 ms  p99   40 ms  n 3`,
+      "   card seen to",
+      `     ${"dispatch".padEnd(32)}  p50   3.2 s  p99   3.2 s  n 1`,
+      " Instances",
+      "   project-a #42",
+      "     phases  agents 5m 00s 75%  setup 1m 40s 25%",
+      "     tokens  worker 1.2M in / 40k out",
+      " Process",
+      "   event loop  p50 0.4 ms  p99 8 ms  max 40 ms",
+    ]));
+    expect(lines.some((l) => l.startsWith(" Client"))).toBe(false);
+    for (const l of metricsPanelLines(VIEW, 100)) expect(l).toHaveLength(100);
+  });
+  it("adds this terminal's own numbers, and says when the brain refused them", () => {
+    const { registry } = createTuiMetrics({ strict: true });
+    registry.observe("swarm_os_client_frame_seconds", 0.002, { kind: "diff" });
+    const lines = metricsPanelLines({ ...VIEW, client: registry.snapshot(), reportError: "the brain refused client metrics (403 forbidden)" }, 100).map((l) => l.trimEnd());
+    expect(lines).toEqual(expect.arrayContaining([
+      " Client (this terminal)",
+      `     ${"frame diff".padEnd(32)}  p50    2 ms  p99    2 ms  n 1`,
+      "   not reported to the brain: the brain refused client metrics (403 forbidden)",
+    ]));
+  });
+});
+
+describe("the m panel in swarm top", () => {
+  it("opens with m from a pane, reloads with r, closes with m or Esc, and is a letter in the input line", () => {
+    const opened = reduceKey({ ...fixtureState(), focus: "rooms" }, { kind: "char", text: "m" }, 15);
+    expect([opened.state.metricsOpen, opened.effects]).toEqual([true, [{ kind: "load-metrics" }]]);
+    expect(reduceKey(opened.state, { kind: "char", text: "r" }, 15).effects).toEqual([{ kind: "load-metrics" }]);
+    expect(reduceKey(opened.state, { kind: "char", text: "x" }, 15).state).toMatchObject({ metricsOpen: true, input: "take it anyway" });
+    expect(reduceKey(opened.state, { kind: "char", text: "q" }, 15).effects).toEqual([{ kind: "quit" }]);
+    expect(reduceKey(opened.state, { kind: "char", text: "m" }, 15).state.metricsOpen).toBe(false);
+    expect(reduceKey(opened.state, { kind: "escape" }, 15).state.metricsOpen).toBe(false);
+    expect(reduceKey({ ...fixtureState(), input: "" }, { kind: "char", text: "m" }, 15).state).toMatchObject({ metricsOpen: false, input: "m" });
+  });
+  it("types the brain's metrics event, which carries no id, and keeps the latest", () => {
+    const data = { at: NOW, top: [], process: [], instances: [{ instanceId: "inst-42", top: [] }] };
+    const e = toBrainEvent({ id: null, type: "metrics", data });
+    expect(e).toEqual({ type: "metrics", id: null, ...data });
+    expect(applyEvent(fixtureState(), e!).state.metricsLive).toEqual(e);
+  });
+  it("draws the panel over the middle rows, with its own hint", () => {
+    const s = applyClientMetrics(applyMetrics({ ...fixtureState(), metricsOpen: true }, { brain: brainSnapshot(), instances: {} }, NOW), createTuiMetrics().registry.snapshot(), null);
+    const lines = renderFrame(s, { columns: 100, rows: 30 }).map(stripAnsi);
+    expect(lines[6]).toMatch(/^ Brain {2}as of 09:00 *$/);
+    expect(lines[28]).toContain("─ m close  j/k scroll  r reload  q quit ─");
+  });
+});
+
+describe("BrainClient timings and the metrics routes", () => {
+  it("times each request by route pattern, method and status class, but not its own reports", async () => {
+    brain = await startFakeBrain({
+      "GET /api/rooms": () => ({ status: 200, body: [] }),
+      "POST /api/commands": () => ({ status: 428, body: { error: { code: "stepup_required", message: "needs a step-up", stepUpId: "su-1" } } }),
+      "POST /api/metrics/client": () => ({ status: 200, body: { accepted: 0 } }),
+    });
+    const { metrics } = testRegistry(OS_METRICS);
+    const c = new BrainClient({ url: brain.url, bearer: "sess_abc", metrics });
+    await c.listRooms();
+    await c.postCommand("room-sys", ["register", "board-a"]);
+    await c.postClientMetrics([]);
+    expect(hist(metrics, "swarm_os_client_api_seconds", { route: "/api/rooms", method: "GET", status: "2xx" }).count).toBe(1);
+    expect(hist(metrics, "swarm_os_client_api_seconds", { route: "/api/commands", method: "POST", status: "4xx" }).count).toBe(1);
+    expect(hist(metrics, "swarm_os_client_api_seconds").count).toBe(2);
+  });
+  it("times the stream's first connection and its reconnection", async () => {
+    brain = await startFakeBrain({}, { hello: () => ({ actor: OWNER, rooms: ROOMS, instances: INSTANCES, resources: RESOURCES, lockdown: false }) });
+    const { metrics } = testRegistry(OS_METRICS);
+    const c = new BrainClient({ url: brain.url, bearer: "sess_abc", metrics, streamBackoffMs: [10, 40] });
+    const statuses: ConnectionStatus[] = [];
+    c.connect({ onEvent: () => {}, onStatus: (s) => statuses.push(s) });
+    await vi.waitFor(() => expect(statuses.at(-1)).toEqual({ state: "open" }));
+    brain.dropStreams();
+    await vi.waitFor(() => expect(["first", "reconnect"].map((kind) => hist(metrics, "swarm_os_client_stream_connect_seconds", { kind }).count)).toEqual([1, 1]));
+    c.close();
+  });
+  it("asks for metrics as JSON or Prometheus text and posts its own records with X-Swarm-Os", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetch = vi.fn(async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, init });
+      return url.includes("format=prometheus") ? new Response("# TYPE x gauge\nx 1\n", { status: 200 }) : new Response(JSON.stringify({ brain: { at: 1 }, instances: {} }), { status: 200 });
+    });
+    const c = new BrainClient({ url: "http://127.0.0.1:3200", bearer: "host_s3cret", fetch: fetch as never });
+    expect(await c.getMetrics({ since: 1000 })).toEqual({ brain: { at: 1 }, instances: {} });
+    expect(await c.getMetricsText()).toBe("# TYPE x gauge\nx 1\n");
+    const rec: ObsRecord = { r: "obs", name: "swarm_os_client_frame_seconds", v: 0.002, t: NOW, labels: { kind: "diff" } };
+    await c.postClientMetrics([rec]);
+    expect(calls.map((x) => [x.init.method ?? "GET", x.url])).toEqual([
+      ["GET", "http://127.0.0.1:3200/api/metrics?format=json&since=1000"],
+      ["GET", "http://127.0.0.1:3200/api/metrics?format=prometheus"],
+      ["POST", "http://127.0.0.1:3200/api/metrics/client"],
+    ]);
+    expect(JSON.parse(String(calls[2]!.init.body))).toEqual({ records: [rec] });
+    expect(new Headers(calls[2]!.init.headers).get("x-swarm-os")).toBe("1");
+  });
+});
+
+describe("ClientObsBuffer and ClientMetricsReporter", () => {
+  it("keeps the terminal's observations, never its spans or snapshots, and posts them in batches of 500", async () => {
+    const { registry, buffer } = createTuiMetrics({ strict: true });
+    for (let i = 0; i < 1200; i++) registry.observe("swarm_os_client_frame_seconds", 0.002, { kind: "diff" });
+    registry.writeSnapshot();
+    const posted: ObsRecord[][] = [];
+    await new ClientMetricsReporter({ buffer, post: async (r) => { posted.push(r); } }).flush();
+    expect(posted.map((b) => b.length)).toEqual([500, 500, 200]);
+    expect(posted[0]![0]).toMatchObject({ r: "obs", name: "swarm_os_client_frame_seconds", v: 0.002, labels: { kind: "diff" } });
+  });
+  it("keeps a batch it could not deliver, and stops reporting once the brain refuses", async () => {
+    const { registry, buffer } = createTuiMetrics({ strict: true });
+    registry.observe("swarm_os_client_frame_seconds", 0.002, { kind: "full" });
+    const post = vi.fn()
+      .mockRejectedValueOnce(new BrainUnreachableError("http://127.0.0.1:3200", new Error("ECONNREFUSED")))
+      .mockRejectedValueOnce(new BrainHttpError(403, "forbidden", "human sessions only"));
+    const reporter = new ClientMetricsReporter({ buffer, post });
+    await reporter.flush();
+    expect([buffer.size, reporter.lastError]).toEqual([1, null]);
+    await reporter.flush();
+    expect([buffer.size, reporter.lastError]).toEqual([0, "the brain refused client metrics (403 forbidden)"]);
+    registry.observe("swarm_os_client_frame_seconds", 0.002, { kind: "full" });
+    await reporter.flush();
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runTui timings", () => {
+  it("times frames, and each event from its arrival to the frame that shows it", async () => {
+    const buffer = new ClientObsBuffer();
+    const { metrics, clock } = testRegistry(OS_METRICS, { sink: buffer });
+    let handlers!: { onEvent(e: BrainEvent): void; onStatus(s: ConnectionStatus): void };
+    const client = {
+      connect: (h: typeof handlers) => { handlers = h; }, close: vi.fn(), listRooms: vi.fn(async () => []), roomMessages: vi.fn(async () => []),
+      getMetrics: vi.fn(async () => ({ brain: null, instances: {} })), postClientMetrics: vi.fn(async () => {}),
+    } as unknown as BrainClientLike;
+    const stdin = new FakeIn();
+    const done = runTui({ client, stdin, stdout: new FakeOut(), now: () => NOW, timeZone: "UTC", signals: new EventEmitter(), metrics: { registry: metrics, buffer }, clock });
+    await vi.waitFor(() => expect(handlers).toBeDefined());
+    handlers.onStatus({ state: "open" });
+    handlers.onEvent(hello());
+    handlers.onEvent({ type: "lockdown", id: 2, active: true });
+    clock.advance(40);
+    await vi.waitFor(() => expect(hist(metrics, "swarm_os_client_event_render_seconds", { type: "lockdown" })).toMatchObject({ count: 1, sum: 0.04 }));
+    expect(hist(metrics, "swarm_os_client_event_render_seconds").count).toBe(2);
+    expect(hist(metrics, "swarm_os_client_frame_seconds").count).toBeGreaterThan(0);
+    stdin.write("\u0003");
+    expect(await done).toBe(0);
+  });
+});
+```
+
+```ts
+// packages/os/tests/api/cli-login-metrics.test.ts
+import { describe, expect, it } from "vitest";
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { CLI_LOGIN_TTL_MS, CliLogins } from "../../src/api/cli-login.js";
+import { OWNER, newWorld } from "../helpers/world.js";
+import { counter, gauge, hist } from "../helpers/series.js";
+
+const NONCE = "n".repeat(43);
+const OTHER = "m".repeat(43);
+const poll = (nonce = NONCE) => ({ nonce, pollSecret: "s".repeat(43), address: "127.0.0.1" });
+
+describe("CliLogins metrics", () => {
+  it("counts polls and approvals by reply, keeps the waiting sign-ins in a gauge, and times each from first poll to collection", async () => {
+    const w = await newWorld();
+    const { metrics, clock } = testRegistry(OS_METRICS);
+    const logins = new CliLogins({ store: w.store, messaging: w.messaging, clock: w.clock, publicUrl: "https://brain.example.test", issueSession: async () => ({ token: "sess_t", expiresAt: "2026-10-26T09:00:00.000Z" }), metrics });
+    await logins.poll(poll());
+    expect(gauge(metrics, "swarm_os_auth_cli_logins_pending")).toBe(1);
+    clock.advance(42_000);
+    await logins.approve(NONCE, OWNER);
+    await logins.approve(NONCE, OWNER);
+    await logins.poll(poll());
+    await logins.poll(poll());
+    await logins.poll(poll(OTHER));
+    w.clock.advance(CLI_LOGIN_TTL_MS + 1);
+    await logins.poll(poll(OTHER));
+    expect(["pending", "approved", "consumed", "expired"].map((outcome) => counter(metrics, "swarm_os_auth_cli_login_polls_total", { outcome }))).toEqual([2, 1, 1, 1]);
+    expect(["ok", "conflict"].map((outcome) => counter(metrics, "swarm_os_auth_cli_login_approvals_total", { outcome }))).toEqual([1, 1]);
+    expect(hist(metrics, "swarm_os_auth_cli_login_seconds", { outcome: "collected" })).toMatchObject({ count: 1, sum: 42 });
+    expect(hist(metrics, "swarm_os_auth_cli_login_seconds", { outcome: "expired" }).count).toBe(1);
+    expect(gauge(metrics, "swarm_os_auth_cli_logins_pending")).toBe(0);
+  });
+});
+```
+
+```ts
+// packages/os/tests/commands/registrations-metrics.test.ts
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { RegisterArgs, registrationCommands } from "../../src/commands/registrations.js";
+import { newWorld } from "../helpers/world.js";
+import { hist } from "../helpers/series.js";
+
+describe("register metrics", () => {
+  it("times the Trello board lookup by status class, a failed connection included", async () => {
+    const w = await newWorld({ boards: { trello: { key: "k", token: "t" } } });
+    const path = join(w.dir, "project-a", ".swarm");
+    mkdirSync(join(path, "domains", "project-a"), { recursive: true });
+    writeFileSync(join(path, "config.json"), "{}");
+    writeFileSync(join(path, "domains", "project-a", "config.json"), "{}");
+    const { metrics } = testRegistry(OS_METRICS);
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 404 })).mockRejectedValueOnce(new TypeError("fetch failed"));
+    const register = registrationCommands({ fetch: fetch as never }).find((s) => s.name === "register")!;
+    const args = RegisterArgs.parse({ board: "abcd1234", project: "project-a", swarmPath: realpathSync(path) });
+    await register.run({ ...w.ctx(w.system.id), metrics }, args).catch(() => {});
+    await register.run({ ...w.ctx(w.system.id), metrics }, args).catch(() => {});
+    expect(hist(metrics, "swarm_os_command_board_lookup_seconds", { source: "trello", status: "4xx", outcome: "ok" }).count).toBe(1);
+    expect(hist(metrics, "swarm_os_command_board_lookup_seconds", { source: "trello", status: "network", outcome: "error" }).count).toBe(1);
+  });
+});
+```
+
+```ts
+// packages/cli/tests/os-metrics.test.ts
+import { describe, expect, it, vi } from "vitest";
+import { OS_METRICS, type MetricsRegistry } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { BrainUnreachableError, type CommandContext } from "@mnmal-ai/swarm-os";
+import { parseArgs } from "../src/cli/args.js";
+import { defineCliCommand } from "../src/cli/as-function/define.js";
+import { cliBackedSpec, roomCommandIo } from "../src/cli/as-function/room.js";
+import { executeOsCommand, routesToOsCommand } from "../src/cli/os-commands.js";
+
+const NOW = Date.parse("2026-10-25T09:00:00.000Z");
+const BODY = { brain: { at: NOW, defs: [], counters: [], gauges: [], histograms: [] }, instances: {} };
+const USAGE = "Usage: swarm os metrics [--top <n>] [--since <dur>] [--json | --prometheus]";
+const hist = (m: MetricsRegistry, name: string, want: Record<string, string> = {}) => {
+  const hs = m.snapshot().histograms.filter((h) => h.name === name && Object.entries(want).every(([k, v]) => h.labels[k] === v));
+  return { count: hs.reduce((n, h) => n + h.count, 0), sum: hs.reduce((n, h) => n + h.sum, 0) };
+};
+function stub() {
+  const out: string[] = []; const err: string[] = [];
+  const client = {
+    getMetrics: vi.fn(async () => BODY),
+    getMetricsText: vi.fn(async () => "# TYPE swarm_os_http_requests_in_flight gauge\nswarm_os_http_requests_in_flight 0\n"),
+    listRooms: vi.fn(), postCommand: vi.fn(),
+  };
+  const deps = { credentials: () => ({ url: "http://127.0.0.1:3200", bearer: "host_s3cret", actor: "host" as const }), client: () => client as never, out: (l: string) => out.push(l), err: (l: string) => err.push(l), now: () => NOW };
+  return { client, out, err, deps };
+}
+
+describe("swarm os metrics", () => {
+  it("is claimed by swarm os, and --json and --prometheus are switches", () => {
+    expect(routesToOsCommand(["metrics"])).toBe(true);
+    expect(parseArgs(["metrics", "--prometheus", "--since", "15m"])).toEqual({ flags: { prometheus: "true", since: "15m" }, positional: ["metrics"] });
+    expect(parseArgs(["metrics", "--json", "--top", "5"])).toEqual({ flags: { json: "true", top: "5" }, positional: ["metrics"] });
+  });
+  it("prints the brain's groups as text by default, with no client group and no room command", async () => {
+    const t = stub();
+    expect(await executeOsCommand(["metrics"], {}, t.deps)).toBe(0);
+    expect(t.client.getMetrics).toHaveBeenCalledWith({});
+    expect(t.out[0]).toMatch(/^ Brain {2}as of \d\d:\d\d$/);
+    expect(t.out).toContain(" Process");
+    expect(t.out.some((l) => l.startsWith(" Client"))).toBe(false);
+    expect(t.client.postCommand).not.toHaveBeenCalled();
+  });
+  it("reads a window with --since, and prints JSON or Prometheus text as asked", async () => {
+    const t = stub();
+    expect(await executeOsCommand(["metrics"], { since: "15m", json: "true" }, t.deps)).toBe(0);
+    expect(t.client.getMetrics).toHaveBeenCalledWith({ since: NOW - 900_000 });
+    expect(JSON.parse(t.out.join("\n"))).toEqual(BODY);
+    const p = stub();
+    expect(await executeOsCommand(["metrics"], { prometheus: "true" }, p.deps)).toBe(0);
+    expect(p.out).toEqual(["# TYPE swarm_os_http_requests_in_flight gauge\nswarm_os_http_requests_in_flight 0"]);
+  });
+  it("answers the usage for a bad window or both formats", async () => {
+    const t = stub();
+    expect(await executeOsCommand(["metrics"], { since: "soon" }, t.deps)).toBe(1);
+    expect(await executeOsCommand(["metrics"], { json: "true", prometheus: "true" }, t.deps)).toBe(1);
+    expect(t.err).toEqual([USAGE, USAGE]);
+  });
+  it("says when no brain answers", async () => {
+    const t = stub();
+    t.client.getMetrics.mockRejectedValue(new BrainUnreachableError("http://127.0.0.1:3200", new Error("ECONNREFUSED")));
+    expect(await executeOsCommand(["metrics"], {}, t.deps)).toBe(1);
+    expect(t.err).toEqual(["No brain is answering at http://127.0.0.1:3200. Start it on its host with: swarm os start"]);
+  });
+});
+
+describe("CLI-backed commands from a room", () => {
+  const roomCtx = (metrics: MetricsRegistry) => ({
+    actor: { kind: "human", humanId: "part-owner" }, roomId: "room-sys", provenance: { source: "owner" }, metrics,
+    store: { registrations: { find: async () => [] }, rooms: { get: async () => null }, instances: { get: async () => null }, messages: { find: async () => [] } },
+    messaging: { post: async () => ({ id: "msg-1", seq: 1 }) },
+  }) as unknown as CommandContext;
+
+  it("times each run by command and outcome, and measures its output", async () => {
+    const { metrics, clock } = testRegistry(OS_METRICS);
+    const doctor = { name: "doctor", summary: "Check the setup", kind: "operating" as const, project: "optional" as const,
+      run: async () => { clock.advance(2500); return { code: 1, stdout: "Swarm Doctor\n", stderr: "fix: swarm substrate start\n" }; } };
+    await cliBackedSpec(doctor).run(roomCtx(metrics), { argv: [] });
+    await cliBackedSpec(doctor).run(roomCtx(metrics), { argv: ["--yes"] });
+    expect(hist(metrics, "swarm_os_command_cli_seconds", { command: "doctor", outcome: "failed" })).toMatchObject({ count: 1, sum: 2.5 });
+    expect(hist(metrics, "swarm_os_command_cli_seconds", { command: "doctor", outcome: "refused" }).count).toBe(1);
+    expect(hist(metrics, "swarm_os_command_cli_output_bytes", { command: "doctor" }).sum).toBe(Buffer.byteLength("Swarm Doctor\nfix: swarm substrate start\n"));
+  });
+  it("times a room question that nobody answers as a timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const { metrics } = testRegistry(OS_METRICS);
+      const answer = roomCommandIo(roomCtx(metrics), 1_000).prompt("Reset the cold store?", ["yes", "no"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await answer).toBe("");
+      expect(hist(metrics, "swarm_os_command_cli_prompt_seconds", { outcome: "timeout" }).count).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("times the wait for the one-at-a-time capture and the project preamble", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const def = (name: string) => defineCliCommand({ name, summary: "s", kind: "operating", project: "none", needs: "none", run: async () => { await new Promise((r) => setTimeout(r, 20)); } });
+    const io = { write: vi.fn(), prompt: vi.fn(async () => "") };
+    await Promise.all([def("sync").run([], io, metrics), def("doctor").run([], io, metrics)]);
+    expect(["sync", "doctor"].map((command) => hist(metrics, "swarm_os_command_cli_wait_seconds", { command, outcome: "ok" }).count)).toEqual([1, 1]);
+    expect(["sync", "doctor"].map((command) => hist(metrics, "swarm_os_command_cli_preamble_seconds", { command, needs: "none", outcome: "ok" }).count)).toEqual([1, 1]);
+    expect(metrics.snapshot().gauges.find((g) => g.name === "swarm_os_command_cli_waiting")?.value).toBe(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run tests/tui/metrics.test.ts tests/api/cli-login-metrics.test.ts tests/commands/registrations-metrics.test.ts`
+Expected: FAIL. `../../src/tui/metrics.js` and `../../src/tui/metrics-view.js` do not exist yet, and the other two files find no series.
+
+Run: `pnpm --filter @mnmal-ai/swarm-os build && cd packages/cli && env -u ANTHROPIC_API_KEY npx vitest run tests/os-metrics.test.ts`
+Expected: FAIL. `routesToOsCommand(["metrics"])` is `false`, and no CLI-backed row is recorded.
+
+- [ ] **Step 3: Implement, and append the rows**
+
+- **`tui/metrics.ts`.**
+  - `createTuiMetrics` builds `new MetricsRegistry({ clock, sink: buffer, strict })` and defines `OS_METRICS.filter((d) => d.name.startsWith("swarm_os_client_"))`.
+  - `ClientMetricsReporter.flush` takes batches of `CLIENT_BATCH_MAX` and awaits `post` for each. On a `BrainUnreachableError`, or a `BrainHttpError` of status 500 and above, it puts the batch back and stops this flush. On any other `BrainHttpError` it drops the batch, sets `lastError` to `the brain refused client metrics (<status> <code>)` and stops for good. Any other error (a client without the method in a test, say) drops the batch. `flush` never rejects, and only one runs at a time.
+- **`tui/client.ts`.**
+  - The request helper takes each call's route pattern (`/api/rooms`, `/api/rooms/:id/messages`, `/api/questions/:id/answer`, `/api/commands`, `/api/stepup/confirm`, `/api/metrics`, `/api/auth/cli/:nonce`). It reads `clock.monoMs()` before `fetch` and again after the body is read, or after `fetch` rejects. It then observes `swarm_os_client_api_seconds { route, method, status }`; a 428, 429 or 403 that `classifyCommandReply` maps is still its own status class. `postClientMetrics` sends `{ records }` with `X-Swarm-Os: 1` and is not timed. `getMetrics` and `getMetricsText` build `format=…`, then `since` and `names` (comma-joined) when given.
+  - `connect` sets a start time and kind `first`. Each `onError` sets a start time, if none is set, and kind `reconnect`. Each `onOpen` observes `swarm_os_client_stream_connect_seconds { kind }` and clears the start time.
+  - `toBrainEvent` accepts `metrics` with `at` (number), `top` and `process` (arrays) and `instances` (an array of `{ instanceId, top }`), checked with `.passthrough()` row objects, and gives it `id: null` whatever the stream sent.
+- **`tui/state.ts`.** `metrics` events replace `metricsLive`, whatever their id, since they are never replayed. `applyMetrics` sets `brainMetrics`, `brainMetricsAt` and clears `metricsError`. `applyMetricsError` sets it, and `applyClientMetrics` sets `clientMetrics` and `clientReportError`.
+- **`tui/keys.ts`.** A new rule comes after rule 3 (help). While `metricsOpen`:
+  - `m` and `escape` close the panel
+  - `j` and `k` move `metricsScroll` by one, `pageup` and `pagedown` by `pageLines`, never below 0
+  - `r` emits `load-metrics`
+  - `q` emits `quit`
+  - every other key is ignored
+
+  In rules 7 and 8, `m` in the rooms or messages pane opens the panel (`metricsOpen: true`, `metricsScroll: 0`) and emits `load-metrics`, instead of moving to the input line. In the input line, `m` is a letter as before.
+- **`tui/render.ts`.** While `metricsOpen` (help first, the step-up box still on top), the middle rows show `metricsPanelLines(metricsViewOf(state), columns)` from line `metricsScroll`, across the full width, with blank rows after. The bottom separator's hint is `FOCUS_HINTS.metrics` in place of the focus hint. `state.status` and the cool-down still come first.
+- **`tui/app.ts`.**
+  - `tm = opts.metrics ?? createTuiMetrics({ clock: opts.clock })` and `clock = opts.clock ?? systemClock`. `reporter = new ClientMetricsReporter({ buffer: tm.buffer, post: (r) => client.postClientMetrics(r) })` starts with the run.
+  - `onEvent` pushes `{ type, at: clock.monoMs() }` onto a pending list before reducing.
+  - The render callback reads `clock.monoMs()`, computes the frame, writes when either part changed, and observes `swarm_os_client_frame_seconds { kind }`: `full` when it drew a full frame, `diff` when it wrote changed rows, `unchanged` when it wrote nothing. It then observes `swarm_os_client_event_render_seconds { type }` for every pending event, and clears the list.
+  - The 1 000 ms tick, while `metricsOpen`, also applies `applyClientMetrics(state, tm.registry.snapshot(), reporter.lastError)`. The `load-metrics` effect does the same, then calls `client.getMetrics()` into `applyMetrics(state, body, now())`. A failure goes to `applyMetricsError(state, describeClientError(err, url) ?? err.message)`.
+  - Cleanup keeps its order and ends, after `LEAVE_SCREEN`, by awaiting `reporter.stop()` for at most 2 s.
+- **`tui/metrics-view.ts`.** `metricsPanelLines` and `metricsViewOf` as described above, with `formatBytes` (powers of 1024, one decimal from KB up). Export the module and `tui/metrics.ts` from `tui/index.ts`.
+- **`api/cli-login.ts`.** `CliLogins` keeps `deps.metrics ?? noopMetrics`.
+  - Every `poll` and `approve` counts its reply's outcome. For a poll: `bad_request`, `limit`, `unknown`, `pending`, `approved`, `consumed` or `expired`. For an approval: `forbidden`, `unknown`, `conflict`, `ok` or `expired`.
+  - Each call then sets `swarm_os_auth_cli_logins_pending` to the number of `pending` and `approved` entries not yet expired.
+  - A nonce's first poll opens a `swarm_os_auth_cli_login_seconds` span, kept on its entry. The poll that collects the session ends it `collected`. The first call that finds the entry expired ends it `expired`, and so does the sweep that removes an entry whose span is still open.
+- **`commands/registrations.ts`.** `register` runs the Trello lookup inside a `(ctx.metrics ?? noopMetrics).span("swarm_os_command_board_lookup_seconds", { source: "trello" })`. A response ends it `ok` with `{ status: <class> }`; a rejected fetch or a timeout ends it `error` with `{ status: "network" }`, then the existing path continues.
+- **`cli/top.ts`.** `runTop` builds `tm = createTuiMetrics()`, makes the client with `makeClient(c, tm.registry)` (by default `new BrainClient({ url: c.url, bearer: c.bearer, metrics: tm.registry })`), and passes `metrics: tm` to `runTui`.
+- **`cli/os-commands.ts`.**
+  - `routesToOsCommand` also claims `metrics`, and `executeOsCommand` hands it to `runOsMetrics` as it hands `login` to `runLogin`.
+  - `runOsMetrics` answers `Usage: <OS_METRICS_USAGE>` on stderr and returns 1 for any of: `--json` together with `--prometheus`, a `--top` that is not a whole number from 1 to 100, or a `--since` that `parseSince` rejects.
+  - It gets the credentials and client as `executeOsCommand` does, calls `getMetrics(since === null ? {} : { since: now() − since })` or the text variant, and prints as described above. Any `describeClientError` text goes to stderr and returns 1.
+  - `parseSince` matches `/^(\d+)(s|m|h|d)$/`.
+- **`cli/args.ts`.** `json` and `prometheus` join `BOOLEAN_FLAGS` when they are not there already.
+- **`as-function/types.ts`, `room.ts`, `define.ts`.**
+  - `cliBackedSpec(d).run` opens `metrics.span("swarm_os_command_cli_seconds", { command: d.name })`, with `metrics = ctx.metrics ?? noopMetrics`. It ends the span `refused` for step 1's and step 2's refusals, `ok` or `failed` by the run's exit code, and `error` (then rethrows) when the descriptor throws. It observes `swarm_os_command_cli_output_bytes` from the run's stdout and stderr before `formatCliOutput`, and passes `metrics` as `d.run`'s third argument.
+  - `roomCommandIo(ctx).prompt` opens `swarm_os_command_cli_prompt_seconds` when it posts the question, and ends it `answered` or `timeout`.
+  - `defineCliCommand(def).run(args, io, metrics = noopMetrics)` keeps a module-level count of runs waiting for the capture. Before calling `withCapturedProcess` it adds one, sets `swarm_os_command_cli_waiting` and opens `swarm_os_command_cli_wait_seconds { command }`. First thing inside the captured run, it takes one off, sets the gauge and ends the span `ok`. Its call to `prepareProjectEnv` runs inside `swarm_os_command_cli_preamble_seconds { command, needs }`, ended `ok`, or `error` when it throws (a `ProcessExit` included, which it rethrows).
+- **The catalogue.** Append the block above under the `// plan 08` line of `OS_METRICS` in `packages/metrics/src/catalogue/os.ts`. Change nothing else in that file. Every name in it is a string literal at its call site, which plan 10's catalogue-completeness test checks once plan 09 turns on `includeOs`.
+
+- [ ] **Step 4: Run the tests, then the task gate**
+
+Run: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run tests/tui tests/api/cli-login-metrics.test.ts tests/commands/registrations-metrics.test.ts && cd ../.. && pnpm --filter @mnmal-ai/swarm-os build && cd packages/cli && env -u ANTHROPIC_API_KEY npx vitest run tests/os-metrics.test.ts tests/os-commands.test.ts tests/top.test.ts tests/as-function-room.test.ts tests/as-function-operating.test.ts`
+Expected: PASS, the earlier TUI goldens and the keys tests unchanged among them. Then run the task gate, `cd packages/metrics && npx vitest run`, and `pnpm -w build` as the plan's last check.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/tui packages/os/src/api/cli-login.ts packages/os/src/commands/registrations.ts packages/os/tests packages/cli/src/cli packages/cli/tests/os-metrics.test.ts packages/cli/package.json packages/metrics/src/catalogue/os.ts pnpm-lock.yaml
+git -c commit.gpgsign=false commit -m "feat(os): the m panel, swarm os metrics, and timings for swarm top, room commands and terminal sign-in"
 ```
 
 ---

@@ -24,6 +24,7 @@
 - "Do not send a bare param as a filter; use `where` with an operator. Do not send numbers as strings." "Do not declare swarm types outside `packages/substrate-plugin/src/types/`." (CLAUDE.md)
 - Conventional Commit prefixes on every commit; never commit `packages/cli/src/version.ts`, which the build regenerates. (CLAUDE.md)
 - Tests read sibling workspace packages from their `dist/`: after changing a package, run `pnpm -w build` (or that package's build) before a dependent package's tests.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 11 records the rows.
 
 ## Review Focus
 
@@ -2218,4 +2219,309 @@ Expected: every turbo test task passes (the CLI suite, `@mnmal-ai/swarm-os`, `@m
 ```bash
 git add tests/integration/os-store.test.ts tests/integration/package.json pnpm-lock.yaml
 git commit -m "test(integration): swarm-os store and journal replay on a real os-scope sidecar"
+```
+
+### Task 11: Metrics
+
+The store layer's share of the owner's metrics requirement: every `SubstrateOsStore` call by op, row kind and outcome, with rows per read and errors by code; the caller's view through `journaledStore` (write time by outcome, the write chain's queue, reads served from the snapshot while the store is down, the outage itself); the journal's append time, size, depth and bytes on disk, and each replay; and `ensureOsStack` step by step. Plan 03 hands `BrainContext.metrics` to every constructor named here.
+
+**Files:**
+- Modify: `packages/os/package.json` (`"@mnmal-ai/swarm-metrics": "workspace:*"` in `dependencies`; later plans assume it), `pnpm-lock.yaml`
+- Modify: `packages/metrics/src/catalogue/os.ts` (this plan's block, in the `// plan 02` slot of `OS_METRICS`)
+- Modify: `packages/os/src/store/substrate-store.ts`, `packages/os/src/journal/journal.ts`, `packages/os/src/stack/os-stack.ts`
+- Create: `packages/os/tests/metrics/helpers.ts` (snapshot lookups; plans 03 to 09 may reuse them)
+- Test: `packages/os/tests/metrics/store-metrics.test.ts`, `packages/os/tests/stack/os-stack.test.ts` (append)
+
+**Interfaces:**
+- Consumes: `Metrics`, `noopMetrics`, `Labels`, `MetricsSnapshot`, `OS_METRICS` from `@mnmal-ai/swarm-metrics`, `testRegistry` from `@mnmal-ai/swarm-metrics/testing` (plan 10); Tasks 3 to 9.
+- Produces:
+
+```ts
+// src/store/substrate-store.ts
+export class SubstrateOsStore implements OsStore {
+  constructor(client: OsSubstrateClient, opts?: { metrics?: Metrics });   // default noopMetrics
+}
+// src/journal/journal.ts
+export interface JournalOptions { clock?: Clock; log?: Logger; metrics?: Metrics }
+export interface JournaledStoreOptions { clock?: Clock; log?: Logger; metrics?: Metrics }
+// src/stack/os-stack.ts
+export interface EnsureOsStackOptions { /* Task 9's fields */ metrics?: Metrics }
+export type OsStackStep = "template" | "postgres" | "sidecars" | "types";
+
+// tests/metrics/helpers.ts
+export function hist(s: MetricsSnapshot, name: string, labels?: Labels): HistogramSnapshot | undefined;   // the first series of that name whose labels include `labels`
+export function counter(s: MetricsSnapshot, name: string, labels?: Labels): number;                      // the sum over matching series, 0 when none
+export function gauge(s: MetricsSnapshot, name: string, labels?: Labels): number | undefined;
+```
+
+Catalogue rows (`kind` is a `RepoName`, `messages` for `next_seq` and `none` for `ping`; `code` is an `OsStoreErrorCode`):
+
+| Name | Kind | Unit | Labels (values) | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_store_op_seconds` | histogram | seconds | `op` (`get`, `put`, `patch`, `delete`, `find`, `next_seq`, `ping`), `kind`, `outcome` (`ok`, `not_found`, `deleted`, `refused`, `unreachable`) | `SubstrateOsStore`: each public `Repo` method, `nextSeq` and `ping` (a `false` ping ends `unreachable`) |
+| `swarm_os_store_read_rows` | histogram | count | `op` (`get`, `find`), `kind` | `SubstrateOsStore` `get` (0 or 1) and `find` |
+| `swarm_os_store_errors_total` | counter | count | `op`, `kind`, `code` | `SubstrateOsStore`, for every `OsStoreError` it throws |
+| `swarm_os_store_write_seconds` | histogram | seconds | `op` (`put`, `patch`, `delete`), `kind`, `outcome` (`stored`, `journaled`, `refused`, `unreachable`, `journal_error`) | `journaledStore`'s writes, from the call to the result its caller gets (rules 4 to 6) |
+| `swarm_os_store_write_wait_seconds` | histogram | seconds | `op` (`put`, `patch`, `delete`), `outcome` (`ok`) | `journaledStore`: from a write's call to its turn on the write chain (rule 3) |
+| `swarm_os_store_queued_writes` | gauge | count | none | `journaledStore`: writes called and not yet settled, raised synchronously at the call |
+| `swarm_os_store_snapshot_reads_total` | counter | count | `op` (`get`, `find`, `next_seq`), `kind` | `journaledStore`, each read answered from the snapshot (degraded, or the store call failed `unreachable`) |
+| `swarm_os_store_degraded` | gauge | count | none | `journaledStore`: 1 while `degraded`, else 0, set on every change |
+| `swarm_os_store_outage_seconds` | histogram | seconds | none | `journaledStore`: each spell `degraded` is true |
+| `swarm_os_store_stack_seconds` | histogram | seconds | `step` (`OsStackStep`), `outcome` (`ok`, `error`) | `ensureOsStack`, each step it runs (a memory store skips `template` and `postgres`) |
+| `swarm_os_journal_append_seconds` | histogram | seconds | `outcome` (`ok`, `error`) | `Journal.append`, lazy initialisation and `datasync` included |
+| `swarm_os_journal_append_bytes` | histogram | bytes | none | `Journal.append`: the line's UTF-8 length |
+| `swarm_os_journal_unreplayed_entries` | gauge | count | none | `Journal`: highest seq minus the replayed mark, set at initialisation, on every append and on every `markReplayed` |
+| `swarm_os_journal_disk_bytes` | gauge | bytes | none | `Journal`: the `journal-*.ndjson` files' sizes, summed at initialisation, raised by each append, lowered by the files `markReplayed` deletes |
+| `swarm_os_journal_mark_seconds` | histogram | seconds | `outcome` (`ok`, `error`) | `Journal.markReplayed` (temp file, `datasync`, rename, deletions) |
+| `swarm_os_journal_read_seconds` | histogram | seconds | `outcome` (`ok`, `error`) | `Journal.unreplayed` |
+| `swarm_os_journal_torn_lines_total` | counter | count | none | `Journal.unreplayed`, beside its `journal.torn_line` warning |
+| `swarm_os_journal_replay_seconds` | histogram | seconds | `outcome` (`complete`, `stopped`) | `JournaledOsStore.replay`, when it found at least one entry (`stopped`: the store went away mid-run) |
+| `swarm_os_journal_replayed_entries_total` | counter | count | `outcome` (`applied`, `superseded`, `failed`) | `JournaledOsStore.replay`, per entry it marks |
+
+The `MetricDef` entries, appended in the `// plan 02` slot:
+
+```ts
+  // plan 02
+  { name: "swarm_os_store_op_seconds", kind: "histogram", unit: "seconds", help: "OS store calls on Substrate, by op, row kind and outcome", labels: ["op", "kind", "outcome"] },
+  { name: "swarm_os_store_read_rows", kind: "histogram", unit: "count", help: "Rows returned per OS store read", labels: ["op", "kind"] },
+  { name: "swarm_os_store_errors_total", kind: "counter", unit: "count", help: "OS store errors, by op, row kind and code", labels: ["op", "kind", "code"] },
+  { name: "swarm_os_store_write_seconds", kind: "histogram", unit: "seconds", help: "Brain writes through the journal, by op, row kind and where they landed", labels: ["op", "kind", "outcome"] },
+  { name: "swarm_os_store_write_wait_seconds", kind: "histogram", unit: "seconds", help: "Time a write waited for its turn on the write chain", labels: ["op", "outcome"] },
+  { name: "swarm_os_store_queued_writes", kind: "gauge", unit: "count", help: "Writes called and not yet settled", labels: [] },
+  { name: "swarm_os_store_snapshot_reads_total", kind: "counter", unit: "count", help: "Reads served from the snapshot while the store was unreachable", labels: ["op", "kind"] },
+  { name: "swarm_os_store_degraded", kind: "gauge", unit: "count", help: "1 while the OS store is degraded, else 0", labels: [] },
+  { name: "swarm_os_store_outage_seconds", kind: "histogram", unit: "seconds", help: "Each spell the OS store was degraded", labels: [] },
+  { name: "swarm_os_store_stack_seconds", kind: "histogram", unit: "seconds", help: "ensureOsStack, by step and outcome", labels: ["step", "outcome"] },
+  { name: "swarm_os_journal_append_seconds", kind: "histogram", unit: "seconds", help: "Journal appends, datasync included", labels: ["outcome"] },
+  { name: "swarm_os_journal_append_bytes", kind: "histogram", unit: "bytes", help: "Size of each journal line", labels: [] },
+  { name: "swarm_os_journal_unreplayed_entries", kind: "gauge", unit: "count", help: "Journal entries not yet replayed into the store", labels: [] },
+  { name: "swarm_os_journal_disk_bytes", kind: "gauge", unit: "bytes", help: "Bytes of journal files on disk", labels: [] },
+  { name: "swarm_os_journal_mark_seconds", kind: "histogram", unit: "seconds", help: "Journal markReplayed calls", labels: ["outcome"] },
+  { name: "swarm_os_journal_read_seconds", kind: "histogram", unit: "seconds", help: "Journal reads of the unreplayed entries", labels: ["outcome"] },
+  { name: "swarm_os_journal_torn_lines_total", kind: "counter", unit: "count", help: "Torn last lines skipped while reading the journal", labels: [] },
+  { name: "swarm_os_journal_replay_seconds", kind: "histogram", unit: "seconds", help: "Journal replays that found entries, by outcome", labels: ["outcome"] },
+  { name: "swarm_os_journal_replayed_entries_total", kind: "counter", unit: "count", help: "Journal entries marked by replay, by outcome", labels: ["outcome"] },
+```
+
+- [ ] **Step 1: Add the dependency and write the failing tests**
+
+In `packages/os/package.json` `dependencies`, add `"@mnmal-ai/swarm-metrics": "workspace:*"`. Run: `pnpm install`. Expected: exit 0.
+
+`packages/os/tests/metrics/helpers.ts`:
+
+```ts
+import type { HistogramSnapshot, Labels, MetricsSnapshot } from "@mnmal-ai/swarm-metrics";
+
+const has = (have: Labels, want: Labels) => Object.entries(want).every(([k, v]) => have[k] === v);
+export const hist = (s: MetricsSnapshot, name: string, labels: Labels = {}): HistogramSnapshot | undefined =>
+  s.histograms.find((h) => h.name === name && has(h.labels, labels));
+export const counter = (s: MetricsSnapshot, name: string, labels: Labels = {}): number =>
+  s.counters.filter((c) => c.name === name && has(c.labels, labels)).reduce((n, c) => n + c.value, 0);
+export const gauge = (s: MetricsSnapshot, name: string, labels: Labels = {}): number | undefined =>
+  s.gauges.find((g) => g.name === name && has(g.labels, labels))?.value;
+```
+
+`packages/os/tests/metrics/store-metrics.test.ts`:
+
+```ts
+import { appendFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { afterEach, describe, expect, it } from "vitest";
+import { Journal, journaledStore } from "../../src/journal/journal.js";
+import { createLogger } from "../../src/log.js";
+import { MemoryOsStore } from "../../src/store/memory-store.js";
+import { SubstrateOsStore } from "../../src/store/substrate-store.js";
+import { FakeClock, FakeSubstrateClient, makeRow } from "../../src/testing/index.js";
+import { counter, gauge, hist } from "./helpers.js";
+
+const quiet = createLogger("test", { sink: () => {} });
+const roots: string[] = [];
+function tempDir(): string {
+  const root = mkdtempSync(join(tmpdir(), "swarm-os-metrics-"));
+  roots.push(root);
+  return join(root, "journal");
+}
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+const put = (id: string) => ({ op: "put" as const, type: "rooms" as const, id, payload: { id } });
+
+describe("SubstrateOsStore metrics", () => {
+  it("times every call by op, row kind and outcome, with rows per read", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const store = new SubstrateOsStore(new FakeSubstrateClient({ clock: new FakeClock() }), { metrics });
+    const room = makeRow("rooms");
+    await store.rooms.put(room);
+    await store.rooms.get(room.id);
+    await store.rooms.get("room-unknown");
+    await store.rooms.find({});
+    await store.rooms.patch(room.id, { name: "board-b" });
+    await store.rooms.delete(room.id);
+    await store.nextSeq("room-a");
+    await store.ping();
+    await expect(store.instances.patch("inst-unknown", { state: "failed" })).rejects.toMatchObject({ code: "not_found" });
+    const s = metrics.snapshot();
+    for (const op of ["put", "find", "patch", "delete"]) expect(hist(s, "swarm_os_store_op_seconds", { op, kind: "rooms", outcome: "ok" })?.count, op).toBe(1);
+    expect(hist(s, "swarm_os_store_op_seconds", { op: "get", kind: "rooms", outcome: "ok" })?.count).toBe(2);   // put's own existence check is not a get
+    expect(hist(s, "swarm_os_store_op_seconds", { op: "next_seq", kind: "messages", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_store_op_seconds", { op: "ping", kind: "none", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_store_op_seconds", { op: "patch", kind: "instances", outcome: "not_found" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_store_read_rows", { op: "get", kind: "rooms" })).toMatchObject({ count: 2, sum: 1 });
+    expect(hist(s, "swarm_os_store_read_rows", { op: "find", kind: "rooms" })).toMatchObject({ count: 1, sum: 1 });
+    expect(counter(s, "swarm_os_store_errors_total", { op: "patch", kind: "instances", code: "not_found" })).toBe(1);
+  });
+
+  it("counts unreachable calls, and a ping that finds the store down", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const client = new FakeSubstrateClient({ clock: new FakeClock() });
+    const store = new SubstrateOsStore(client, { metrics });
+    client.down = true;
+    await expect(store.boards.get("board-x")).rejects.toMatchObject({ code: "unreachable" });
+    expect(await store.ping()).toBe(false);
+    const s = metrics.snapshot();
+    expect(counter(s, "swarm_os_store_errors_total", { op: "get", kind: "boards", code: "unreachable" })).toBe(1);
+    expect(hist(s, "swarm_os_store_op_seconds", { op: "ping", kind: "none", outcome: "unreachable" })?.count).toBe(1);
+  });
+});
+
+describe("Journal metrics", () => {
+  it("times and sizes appends, and tracks unreplayed entries and bytes on disk across files", async () => {
+    const dir = tempDir();
+    const first = new Journal(dir, { log: quiet });
+    await first.append(put("room-a"));
+    await first.append(put("room-b"));
+    const { metrics } = testRegistry(OS_METRICS);
+    const second = new Journal(dir, { log: quiet, metrics });
+    await second.append(put("room-c"));
+    const size = (file: string) => statSync(join(dir, file)).size;
+    let s = metrics.snapshot();
+    expect(hist(s, "swarm_os_journal_append_seconds", { outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_journal_append_bytes")).toMatchObject({ count: 1, sum: size("journal-2.ndjson") });
+    expect(gauge(s, "swarm_os_journal_unreplayed_entries")).toBe(3);
+    expect(gauge(s, "swarm_os_journal_disk_bytes")).toBe(size("journal-1.ndjson") + size("journal-2.ndjson"));
+    await second.markReplayed(3);
+    s = metrics.snapshot();
+    expect(hist(s, "swarm_os_journal_mark_seconds", { outcome: "ok" })?.count).toBe(1);
+    expect(gauge(s, "swarm_os_journal_unreplayed_entries")).toBe(0);
+    expect(gauge(s, "swarm_os_journal_disk_bytes")).toBe(size("journal-2.ndjson"));
+  });
+
+  it("counts torn lines and failed appends", async () => {
+    const dir = tempDir();
+    await new Journal(dir, { log: quiet }).append(put("room-a"));
+    appendFileSync(join(dir, "journal-1.ndjson"), '{"seq":2,"at":"2026-01-01T00:00:00.000Z","op":"put","ty');
+    const { metrics } = testRegistry(OS_METRICS);
+    await new Journal(dir, { log: quiet, metrics }).unreplayed();
+    await new Journal(join(dir, "journal-1.ndjson", "journal"), { log: quiet, metrics }).append(put("room-b")).catch(() => {});   // a directory under a regular file
+    const s = metrics.snapshot();
+    expect(counter(s, "swarm_os_journal_torn_lines_total")).toBe(1);
+    expect(hist(s, "swarm_os_journal_read_seconds", { outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_journal_append_seconds", { outcome: "error" })?.count).toBe(1);
+  });
+});
+
+describe("journaledStore metrics", () => {
+  function setup() {
+    const { metrics, clock } = testRegistry(OS_METRICS);
+    const brainClock = new FakeClock();
+    const client = new FakeSubstrateClient({ clock: brainClock });
+    const journal = new Journal(tempDir(), { clock: brainClock, log: quiet, metrics });
+    const store = journaledStore(new SubstrateOsStore(client, { metrics }), journal, new MemoryOsStore(), { clock: brainClock, log: quiet, metrics });
+    return { metrics, clock, client, store };
+  }
+
+  it("counts writes by where they landed, snapshot reads and the outage while the store is down, then the replay", async () => {
+    const { metrics, clock, client, store } = setup();
+    const kept = makeRow("rooms");
+    await store.rooms.put(kept);
+    client.down = true;
+    await store.rooms.put(makeRow("rooms"));
+    await store.rooms.get(kept.id);
+    await store.rooms.find({});
+    await store.nextSeq("room-a");
+    let s = metrics.snapshot();
+    expect(hist(s, "swarm_os_store_write_seconds", { op: "put", kind: "rooms", outcome: "stored" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_store_write_seconds", { op: "put", kind: "rooms", outcome: "journaled" })?.count).toBe(1);
+    expect(counter(s, "swarm_os_store_errors_total", { op: "put", kind: "rooms", code: "unreachable" })).toBe(1);
+    expect(counter(s, "swarm_os_store_snapshot_reads_total", { op: "get", kind: "rooms" })).toBe(1);
+    expect(counter(s, "swarm_os_store_snapshot_reads_total", { op: "find", kind: "rooms" })).toBe(1);
+    expect(counter(s, "swarm_os_store_snapshot_reads_total", { op: "next_seq", kind: "messages" })).toBe(1);
+    expect(gauge(s, "swarm_os_store_degraded")).toBe(1);
+    expect(gauge(s, "swarm_os_journal_unreplayed_entries")).toBe(1);
+    clock.advance(30_000);
+    client.down = false;
+    await store.replay();
+    s = metrics.snapshot();
+    expect(hist(s, "swarm_os_journal_replay_seconds", { outcome: "complete" })?.count).toBe(1);
+    expect(counter(s, "swarm_os_journal_replayed_entries_total", { outcome: "applied" })).toBe(1);
+    expect(gauge(s, "swarm_os_store_degraded")).toBe(0);
+    expect(hist(s, "swarm_os_store_outage_seconds")).toMatchObject({ count: 1, sum: 30 });
+  });
+
+  it("measures the write chain's depth and each write's wait for its turn", async () => {
+    const { metrics, store } = setup();
+    const inst = makeRow("instances", { tokens: 0 });
+    await store.instances.put(inst);
+    const writes = [1, 2, 3].map((tokens) => store.instances.patch(inst.id, { tokens }));
+    expect(gauge(metrics.snapshot(), "swarm_os_store_queued_writes")).toBe(3);
+    await Promise.all(writes);
+    const s = metrics.snapshot();
+    expect(gauge(s, "swarm_os_store_queued_writes")).toBe(0);
+    expect(hist(s, "swarm_os_store_write_wait_seconds", { op: "patch", outcome: "ok" })?.count).toBe(3);
+  });
+});
+```
+
+Append to `describe("ensureOsStack")` in `packages/os/tests/stack/os-stack.test.ts` (importing `OS_METRICS`, `testRegistry` and `hist` from `../metrics/helpers.js`):
+
+```ts
+  it("times each step it runs, and the step that failed", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    await ensureOsStack(makeConfig(), { osHome, log: quiet, lifecycle: recorder().lifecycle, metrics });
+    await ensureOsStack(makeConfig(), { osHome, log: quiet, lifecycle: recorder({ postgresUp: false }).lifecycle, metrics }).catch(() => {});
+    await ensureOsStack(makeConfig({ os_stack: { postgres_url: "memory" } }), { osHome, log: quiet, lifecycle: recorder().lifecycle, metrics });
+    const s = metrics.snapshot();
+    expect(hist(s, "swarm_os_store_stack_seconds", { step: "template", outcome: "ok" })?.count).toBe(2);
+    expect(hist(s, "swarm_os_store_stack_seconds", { step: "postgres", outcome: "ok" })?.count).toBe(1);
+    expect(hist(s, "swarm_os_store_stack_seconds", { step: "postgres", outcome: "error" })?.count).toBe(1);
+    for (const step of ["sidecars", "types"]) expect(hist(s, "swarm_os_store_stack_seconds", { step, outcome: "ok" })?.count, step).toBe(2);
+  });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `pnpm --filter @mnmal-ai/swarm-metrics build && cd packages/os && npx vitest run tests/metrics/store-metrics.test.ts tests/stack/os-stack.test.ts`
+Expected: FAIL. The constructors ignore `metrics`, so every `hist(...)` is `undefined`, every `counter(...)` is 0 and every `gauge(...)` is `undefined`.
+
+- [ ] **Step 3: Implement**
+
+1. Append the block above to `OS_METRICS` and run `pnpm --filter @mnmal-ai/swarm-metrics build`.
+2. `SubstrateOsStore`: keep `opts.metrics ?? noopMetrics`. Each public `Repo` method of each repo, `nextSeq` and `ping` runs inside a `swarm_os_store_op_seconds` span labelled `{ op, kind }`, ended `ok` or with the `OsStoreError`'s `code`; before rethrowing, increment `swarm_os_store_errors_total { op, kind, code }`. `get` observes `swarm_os_store_read_rows` 0 or 1 and `find` the length it returns. `put`'s existence check calls a private, unmetered read, so it is part of the `put` span and never a `get`. `ping` ends `ok` for `true` and `unreachable` for `false`.
+3. `Journal`: keep `opts.metrics ?? noopMetrics`.
+   - `append` runs inside a `swarm_os_journal_append_seconds` span (lazy initialisation and `datasync` included), ended `ok` or `error` before a `JournalError` is rethrown; it observes the line's `Buffer.byteLength` in `swarm_os_journal_append_bytes`.
+   - Initialisation sums the sizes of the `journal-*.ndjson` files it scans into the disk-bytes count and sets both gauges. The journal keeps its highest seq and its mark, so `swarm_os_journal_unreplayed_entries` is `max(0, highest - mark)`, set after initialisation, each append and each `markReplayed`; `swarm_os_journal_disk_bytes` rises by each line's bytes and falls by the size of each file `markReplayed` deletes (`stat` before `unlink`).
+   - `markReplayed` runs inside a `swarm_os_journal_mark_seconds` span; `unreplayed` inside `swarm_os_journal_read_seconds`, incrementing `swarm_os_journal_torn_lines_total` where it logs `journal.torn_line`.
+4. `journaledStore`: keep `opts.metrics ?? noopMetrics`.
+   - Each write raises `swarm_os_store_queued_writes` synchronously when it is called, before its first `await`, and lowers it when it settles. It opens a `swarm_os_store_write_wait_seconds` span `{ op }` at the call, ended `ok` when its turn on the chain begins, and a `swarm_os_store_write_seconds` span `{ op, kind }` at the call, ended `stored` (the store took it), `journaled` (applied to the snapshot under rule 5's `unreachable` or rule 6), `refused` (validation, or a store refusal other than `unreachable`), `unreachable` (rule 6's patch with no snapshot row) or `journal_error`.
+   - Every read the snapshot answers, under rule 7 or rule 8, increments `swarm_os_store_snapshot_reads_total { op, kind }` (`next_seq` with `kind: "messages"`).
+   - One private setter changes `degraded`: it sets `swarm_os_store_degraded`, opens a `swarm_os_store_outage_seconds` span when it turns true and ends it when it turns false.
+   - `replay()`, when it finds at least one entry, runs inside a `swarm_os_journal_replay_seconds` span ended `complete`, or `stopped` when an `unreachable` ends the run; each entry it marks increments `swarm_os_journal_replayed_entries_total` with `applied`, `superseded` or `failed`.
+5. `ensureOsStack`: keep `opts.metrics ?? noopMetrics`. Steps 1 to 3 of Task 9 run as `template` (writing the compose file), `postgres` (`ensureDedicatedPostgres` and its `false` → `OsStackError`), `sidecars` (`ensureAllSidecars`) and `types` (`ensureTypesRegistered`), each inside a `swarm_os_store_stack_seconds` span `{ step }` ended `ok` or `error` before rethrowing; a memory store runs neither of the first two. When plan 10 gave `SubstrateClient` a metrics option, pass the same handle to the client this function builds, so the brain's Substrate requests are counted on plan 10's rows too.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd packages/os && npx vitest run`
+Expected: PASS (11 files; every earlier file unchanged).
+
+Run: `pnpm -w build`
+Expected: exit 0, every turbo task successful.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os pnpm-lock.yaml packages/metrics/src/catalogue/os.ts
+git -c commit.gpgsign=false commit -m "feat(os): measure the OS store, the journal, replay and the OS stack's bring-up"
 ```

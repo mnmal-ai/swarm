@@ -33,6 +33,7 @@
 - **Tests:** vitest under `packages/os/tests/` (helpers in `packages/os/tests/helpers/`), run with `env -u ANTHROPIC_API_KEY`. Every test uses a `mkdtemp` OS home, listens on port `0` on `127.0.0.1`, and never runs `launchctl`, `systemctl`, `tailscale` or Docker. HTTP tests use node `http` or global `fetch`; SSE tests use this plan's `openEventStream`. Passkey verification is mocked (Task 7); later plans' parts are fakes injected through `deps`.
 - **Verification after every task:** `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run && pnpm build` is green; Task 13 adds `cd packages/cli && env -u ANTHROPIC_API_KEY npx vitest run`; the plan ends with `pnpm turbo build`.
 - **CI:** no workflow files, no trigger changes, no push. Commits stay local, with Conventional Commit subjects.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Tasks 14 and 15 record the rows.
 
 ## Review Focus
 
@@ -2252,4 +2253,656 @@ Expected: PASS everywhere (the existing CLI suite included); every turbo build t
 ```bash
 git add packages/cli/src/cli/os.ts packages/cli/src/cli/optional-command.ts packages/cli/src/cli/main.ts packages/cli/package.json pnpm-lock.yaml packages/cli/tests/os-cli.test.ts packages/cli/tests/os-main.test.ts
 git commit -m "feat(cli): swarm os init, start, stop, status, install, uninstall, lockdown and confirm"
+```
+
+---
+
+### Task 14: Metrics: the brain's registry, `GET /api/metrics`, client timings and the SSE `metrics` event
+
+**Files:**
+- Create: `packages/os/src/brain/metrics.ts`, `packages/os/src/api/metrics-routes.ts`
+- Modify: `packages/os/src/config/schema.ts` (the `metrics` block; `"metrics"` joins `RESTART_REQUIRED_KEYS`), `packages/os/src/config/paths.ts` (`OsPaths.metrics`), `packages/os/src/config/init.ts` (`defaultOsConfig` writes `metrics: { retain_days: 14 }`), `packages/os/src/sse/hub.ts` (`broadcast`), `packages/os/src/brain/module.ts` (`BrainContext.metrics`, `metricsSink` and `brainMetrics`; `BrainServices.instanceMetrics`), `packages/os/src/brain/brain.ts` (`BrainDeps.metrics`; the registry at step 1, the routes, the `metrics_event` periodic, stop), `packages/os/src/index.ts`, `packages/metrics/src/catalogue/os.ts` (the plan 03 slot)
+- Test: `packages/os/tests/metrics/brain-metrics.test.ts`, `packages/os/tests/metrics/api-metrics.test.ts`, `packages/os/tests/helpers/brain-metrics.ts`; Modify `packages/os/tests/config.test.ts` (the `osPaths` expectation gains `metrics`; one test added) and `packages/os/tests/brain.test.ts` (one test added)
+
+**Interfaces:**
+- Consumes: from `@mnmal-ai/swarm-metrics` (plan 10): `Metrics`, `MetricDef`, `MetricsRegistry`, `MetricsClock`, `MetricsSnapshot`, `GaugeSnapshot`, `HistogramSnapshot`, `MetricRecord`, `SinkRow`, `JsonlMetricsSink`, `readMetricsDir`, `aggregate`, `topSinks`, `startProcessSampler`, `CATALOGUE`, `defineAll`, `setProcessMetrics`, `processMetrics`; `testRegistry` and `FakeMetricsClock` from `@mnmal-ai/swarm-metrics/testing`. This plan's Tasks 1 (`OsConfigSchema`, `osPaths`), 3 (`ApiServer`, `ApiError`, `parseBody`), 4 (`requireAuth`, `credentialsFrom`), 5 (`EventHub`), 8 (`authFixture`) and 10 (`Brain`, `BrainContext`, `BrainServices`, `Periodics`). Plan 02's test helpers `hist`, `counter` and `gauge` (`packages/os/tests/metrics/helpers.ts`). `packages/os` already depends on `@mnmal-ai/swarm-metrics` (plan 02's metrics task).
+- Produces:
+```ts
+// packages/os/src/config/schema.ts (additions)
+//   metrics: z.object({ retain_days: z.number().int().min(1).max(366).default(14) }).default({ retain_days: 14 })
+export const RESTART_REQUIRED_KEYS: readonly ["bind", "public_url", "os_stack", "launcher", "metrics"];
+// packages/os/src/config/paths.ts (addition)
+export interface OsPaths { /* … */ metrics: string }      // <home>/metrics: the brain's day files
+// packages/os/src/sse/hub.ts (addition)
+export class EventHub {
+  broadcast(visibleTo: HubEvent["visibleTo"], event: { type: string; payload: unknown }): number;
+  // writes `event:` and `data:` with no `id:` line to each attached stream the event is visible to whose hello and replay are written;
+  // never in the ring, never replayed, no sequence number, no seqFile write; returns the number of streams written
+}
+// packages/os/src/brain/metrics.ts
+export const METRICS_EVENT_EVERY_MS = 5_000, METRICS_SNAPSHOT_EVERY_MS = 60_000, MAX_CLIENT_RECORDS = 500;
+export interface InstanceMetricsEntry { at: number; snapshot: MetricsSnapshot }
+export interface InstanceMetricsPort {                           // plan 04's InstanceMetricsStore class satisfies it; plan 04 exports that class under its own name from src/index.ts, so this port has another
+  put(instanceId: string, snapshot: MetricsSnapshot): void;
+  latest(): Record<string, InstanceMetricsEntry>;
+}
+export interface InstanceSnapshotRecord { r: "instance"; instanceId: string; at: number; snapshot: MetricsSnapshot }   // plan 04's InstanceMetricsRecord, structurally
+export interface BrainMetricsSink { write(record: MetricRecord | InstanceSnapshotRecord): void }                       // BrainContext.metricsSink
+export interface MetricsReport { brain: MetricsSnapshot; instances: Record<string, InstanceMetricsEntry> }   // the GET /api/metrics JSON body
+export interface CompactMetrics { at: number; top: SinkRow[]; process: GaugeSnapshot[]; instances: Array<{ instanceId: string; top: SinkRow[] }> }   // the SSE metrics payload
+export function brainMetricsClock(clock: Clock): MetricsClock;   // epochMs from the brain's Clock (so day files and record times agree with it), monoMs from performance.now()
+export function dayFile(date: Date): string;                      // "YYYY-MM-DD.jsonl", the UTC date
+export class BrainMetrics {
+  constructor(opts: { dir: string; retainDays: number; clock: Clock; log: Logger; registry?: MetricsRegistry; sampler?: boolean /* default true */; diskPaths?: string[] });
+  // without `registry`: new MetricsRegistry({ clock: brainMetricsClock(clock), sink: new JsonlMetricsSink(dir, { file: dayFile, retainDays, now: () => clock.now(), onError }), onWarn });
+  // with one (tests): that registry and no sink of its own. Either way defineAll(registry).
+  readonly registry: MetricsRegistry;
+  readonly metrics: Metrics;                                     // registry.with({ process: "brain" }); this is BrainContext.metrics
+  readonly dir: string;
+  readonly sink: BrainMetricsSink;                               // the JsonlMetricsSink it owns, or one that drops every record when a registry was handed in
+  instanceSource: Pick<InstanceMetricsPort, "latest"> | null;   // the brain sets a lazy one over ctx.services.instanceMetrics
+  start(): void;                                                 // setProcessMetrics(metrics); inc swarm_os_brain_boots_total; startSnapshots(METRICS_SNAPSHOT_EVERY_MS); startProcessSampler(metrics, { diskPaths }) unless sampler is false; writes one snapshot now
+  addCollector(name: string, fn: () => void | Promise<void>): void;   // later plans' gauges (instances by state, cool-downs); run by collect()
+  collect(): Promise<void>;                                      // sets swarm_os_brain_uptime_seconds, then runs each collector in turn under swarm_os_brain_collector_seconds; a throw is logged ("metrics_collector_failed", { name, message }) and never raised
+  snapshot(): MetricsSnapshot;
+  uptimeSeconds(): number;                                       // whole seconds since construction, by the brain's Clock
+  instances(): Record<string, InstanceMetricsEntry>;            // instanceSource?.latest() ?? {}
+  report(q?: { since?: number; names?: readonly string[] }): Promise<MetricsReport>;
+  compact(): Promise<CompactMetrics>;
+  flush(): Promise<void>;                                        // collect(), writeSnapshot(), then the sink's flush
+  stop(opts?: { final?: boolean /* default true */ }): Promise<void>;   // stops the sampler and the snapshot timer; with final, collect() and a last snapshot; closes the sink; setProcessMetrics(null) when processMetrics() is still this registry's view
+}
+export function filterSnapshot(snapshot: MetricsSnapshot, names?: readonly string[]): MetricsSnapshot;   // defs and series whose name starts with one of `names`; all of it without `names`
+export function filterPrometheus(text: string, names?: readonly string[]): string;                       // HELP, TYPE and sample lines of the metrics whose name starts with one of `names`
+export function parseSince(value: string, nowMs: number): number;                                        // "<n>s|m|h|d" back from now, or an ISO-8601 instant not after now; else ApiError("bad_request", …, { reason: "bad_since" })
+// packages/os/src/api/metrics-routes.ts
+export function registerMetricsRoutes(server: ApiServer, deps: { brainMetrics: BrainMetrics; clock: Clock }): void;
+// packages/os/src/brain/module.ts (additions to plan 03's part of the interfaces)
+export interface BrainContext { metrics: Metrics; metricsSink: BrainMetricsSink; brainMetrics: BrainMetrics }   // metricsSink: plan 04 writes its { r: "instance" } records through it
+export interface BrainServices { instanceMetrics?: InstanceMetricsPort }    // plan 04's dispatch module sets it to its InstanceMetricsStore
+// packages/os/src/brain/brain.ts (addition)
+export interface BrainDeps { metrics?: BrainMetrics }    // default new BrainMetrics({ dir: paths.metrics, retainDays: config.metrics.retain_days, clock, log, diskPaths: [paths.home] })
+// packages/os/tests/helpers/brain-metrics.ts
+export function testBrainMetrics(o?: { clock?: Clock; dir?: string; extraDefs?: readonly MetricDef[] }): { brainMetrics: BrainMetrics; registry: MetricsRegistry; metricsClock: FakeMetricsClock; dir: string };
+  // testRegistry([...CATALOGUE, ...(extraDefs ?? [])]), strict, on a FakeMetricsClock; clock defaults to testClock(); dir to a new mkdtemp; sampler off
+```
+
+Routes (both behind `requireAuth`):
+
+| Route | Auth | Query or body | Answer |
+|---|---|---|---|
+| `GET /api/metrics` | human, host | `format` `json` (default) or `prometheus`, else 400 `reason: "bad_format"`; `names`, a comma list of at most 50 prefixes each matching `/^swarm_[a-z0-9_]*$/`, else 400 `reason: "bad_names"`; `since`, through `parseSince` | `json`: `await collect()`, then `report({ since, names })`. `prometheus`: `since` is 400 `reason: "since_needs_json"`; else `await collect()` and 200 `text/plain; version=0.0.4; charset=utf-8`, `Cache-Control: no-store`, body `filterPrometheus(registry.toPrometheus(), names)`, written by the handler itself |
+| `POST /api/metrics/client` | human, host | `{ records: unknown[] }` with at least one record; more than `MAX_CLIENT_RECORDS` is 400 `reason: "too_many_records"` | `{ accepted: n }` |
+
+Rules:
+- **`report({ since })` without `since`**: `brain` is `filterSnapshot(registry.snapshot(), names)` and `instances` is `instances()` with each snapshot filtered the same way. **With `since`**: `flush()` first, then read the files of `dir` whose name matches `/^\d{4}-\d{2}-\d{2}\.jsonl$/` and is not before `dayFile(new Date(since - 86_400_000))` through `readMetricsDir`, without its `since` (counters need each boot's last snapshot before the window). Records with `r === "instance"` go aside: per `instanceId`, the one with the latest `at` at or after `since`, then overlaid by `instances()` entries at or after `since`. Of the rest, keep every `snap`, `obs` with `t >= since` and `span` with `start >= since`, and `brain` is `aggregate(kept, { since, defs })`, filtered by `names`. Both forms run under `swarm_os_brain_metrics_report_seconds{source: "live" | "files"}`.
+- **`compact()`**: `collect()`, then `{ at: clock.now().getTime(), top: topSinks(snapshot, 10), process: the snapshot's gauges whose name starts with "swarm_process_", instances: each instances() entry as { instanceId, top: topSinks(entry.snapshot, 3) } }`.
+- **`POST /api/metrics/client`**: `client` is `"tui"` when the request carried a bearer token (`credentialsFrom(req).bearer`: the TUI's session token or the host's) and `"web"` for the session cookie. The records are checked in order and the first failure refuses the whole batch with 400 and its `reason`: `r` is `"obs"` and `name` starts `swarm_os_client_` (`bad_name`); the name is a histogram the brain's registry declares (`unknown_metric`); `labels` is an object of strings whose keys are among that def's labels other than `client`, each value 1 to 120 printable ASCII characters without spaces (`bad_labels`); `v` is a finite number at least 0 (`bad_value`). Then each record is `metrics.observe(name, v, { ...labels, client })`; the record's own `t` is not used. `swarm_os_client_records_total{client, outcome}` counts the batch's records as `accepted` or `refused`. The declared defs are read once, at construction, from `registry.snapshot().defs`.
+- **`broadcast`**: a stream that is still writing its hello or replay skips the event; `swarm_os_sse_*` recording for it is Task 15's.
+- **The brain**, in `Brain.start` (Task 10's order):
+  - Step 1 also builds `brainMetrics = deps.metrics ?? new BrainMetrics(…)` and calls `brainMetrics.start()`, so the store's opening (step 2) is recorded too.
+  - Step 5 also calls `registerMetricsRoutes(api, { brainMetrics, clock })`.
+  - Step 6 also adds `{ name: "metrics_event", everyMs: METRICS_EVENT_EVERY_MS, run: async () => { hub.broadcast((a) => a.kind === "human" || a.kind === "host", { type: "metrics", payload: await brainMetrics.compact() }); } }`.
+  - Step 7's `ctx` also carries `metrics: brainMetrics.metrics`, `metricsSink: brainMetrics.sink` and `brainMetrics`, and sets `brainMetrics.instanceSource = { latest: () => ctx.services.instanceMetrics?.latest() ?? {} }`, read at call time.
+  - A failed start also awaits `brainMetrics.stop()`; `stop()` awaits it after `api.close()`.
+- A client that reads `/api/stream` sees the `metrics` event carry the id of the event before it (an event without an `id:` line keeps the stream's last event id), so a client must not de-duplicate `metrics` events by id.
+
+Catalogue rows this task adds (in the plan 03 slot of `OS_METRICS` in `packages/metrics/src/catalogue/os.ts`; Task 15 adds the rest of plan 03's):
+
+| Name | Kind | Unit | Labels | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_brain_boots_total` | counter | count | | `BrainMetrics.start` |
+| `swarm_os_brain_uptime_seconds` | gauge | seconds | | `BrainMetrics.collect` |
+| `swarm_os_brain_collector_seconds` | histogram | seconds | `collector`, `outcome` | `BrainMetrics.collect`, each collector |
+| `swarm_os_brain_metrics_report_seconds` | histogram | seconds | `source` (`live`, `files`), `outcome` | `BrainMetrics.report` |
+| `swarm_os_client_records_total` | counter | count | `client` (`web`, `tui`), `outcome` (`accepted`, `refused`) | `POST /api/metrics/client` |
+
+```ts
+  // plan 03
+  // Task 14: the brain's registry and its surfaces
+  { name: "swarm_os_brain_boots_total", kind: "counter", unit: "count", help: "Brain starts; one per registry lifetime", labels: [] },
+  { name: "swarm_os_brain_uptime_seconds", kind: "gauge", unit: "seconds", help: "Seconds since this brain started", labels: [] },
+  { name: "swarm_os_brain_collector_seconds", kind: "histogram", unit: "seconds", help: "Time a metrics collector took to set its gauges", labels: ["collector", "outcome"] },
+  { name: "swarm_os_brain_metrics_report_seconds", kind: "histogram", unit: "seconds", help: "Time to build a GET /api/metrics report, live or from the day files", labels: ["source", "outcome"] },
+  { name: "swarm_os_client_records_total", kind: "counter", unit: "count", help: "Timing records the dashboard and the TUI sent to POST /api/metrics/client", labels: ["client", "outcome"] },
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+`packages/os/tests/config.test.ts`: in `honours SWARM_OS_HOME and defaults to ~/.swarm/os`, the `osPaths` expectation gains `metrics: "/path/to/os/metrics"`; and one test is added:
+```ts
+it("reads metrics.retain_days, 14 by default, and keeps a changed value for the next start", () => {
+  expect(makeConfig().metrics).toEqual({ retain_days: 14 });
+  const target = makeConfig(); const next = structuredClone(target); next.metrics = { retain_days: 3 };
+  expect(applyReload(target, next)).toEqual(["metrics"]);
+  expect(target.metrics.retain_days).toBe(14);
+  expect(() => OsConfigSchema.parse({ ...makeConfig(), metrics: { retain_days: 0 } })).toThrow();
+});
+```
+`packages/os/tests/metrics/brain-metrics.test.ts` (`h(name, sum, labels?)` builds a one-observation seconds `HistogramSnapshot`, `snap(histograms)` a `MetricsSnapshot` at `T0` with nothing else, and `lines(path)` parses a JSON-lines file):
+```ts
+it("counts the boot, labels every record process=brain, and writes snapshots to the UTC day file of the brain's clock", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "brain-metrics-"));
+  const bm = new BrainMetrics({ dir, retainDays: 14, clock: testClock(), log: testLog(), sampler: false });
+  bm.start(); await bm.flush();
+  const snaps = lines(join(dir, "2026-10-25.jsonl")).filter((r) => r.r === "snap");
+  expect(snaps.at(-1).counters).toEqual(expect.arrayContaining([{ name: "swarm_os_brain_boots_total", labels: { process: "brain" }, value: 1 }]));
+  expect(processMetrics()).toBe(bm.metrics);
+  expect(dayFile(new Date("2026-10-25T23:59:59.999Z"))).toBe("2026-10-25.jsonl");
+  await bm.stop();
+  expect(processMetrics()).toBe(noopMetrics);
+});
+it("keeps two boots in one day file, and aggregate sums their counters", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "brain-metrics-"));
+  for (const _ of [1, 2]) {
+    const bm = new BrainMetrics({ dir, retainDays: 14, clock: testClock(), log: testLog(), sampler: false });
+    bm.start(); await bm.flush(); await bm.stop({ final: false });
+  }
+  const records: MetricRecord[] = [];
+  for await (const r of readMetricsDir(dir)) records.push(r);
+  expect(new Set(records.filter((r) => r.r === "snap").map((r) => (r as SnapRecord).boot)).size).toBe(2);
+  expect(counter(await aggregate(records), "swarm_os_brain_boots_total")).toBe(2);
+});
+it("report() is the live registry and each instance's latest snapshot, both filtered by name prefix", async () => {
+  const { brainMetrics: bm } = testBrainMetrics();
+  bm.metrics.set("swarm_process_rss_bytes", 1024);
+  bm.instanceSource = { latest: () => ({ "inst-1": { at: T0.getTime(), snapshot: snap([h("swarm_git_command_seconds", 3, { cmd: "fetch", outcome: "ok" }), h("swarm_agent_api_seconds", 12)]) } }) };
+  const all = await bm.report();
+  expect([Object.keys(all.instances), all.brain.defs.length > 0]).toEqual([["inst-1"], true]);
+  const some = await bm.report({ names: ["swarm_process_", "swarm_git_"] });
+  expect(some.brain.gauges.map((g) => g.name)).toEqual(["swarm_process_rss_bytes"]);
+  expect(some.instances["inst-1"].snapshot.histograms.map((x) => x.name)).toEqual(["swarm_git_command_seconds"]);
+  expect(hist(bm.snapshot(), "swarm_os_brain_metrics_report_seconds", { source: "live", outcome: "ok" })?.count).toBe(2);
+});
+it("report({ since }) reads the day files: each boot's counter increase in the window, observations and instance records from the window only", async () => {
+  const { brainMetrics: bm, dir } = testBrainMetrics();
+  const t = (iso: string) => Date.parse(iso);
+  const jsonl = (rs: object[]) => rs.map((r) => JSON.stringify(r)).join("\n") + "\n";
+  const boots = (boot: string, at: string, value: number) => ({ r: "snap", t: t(at), boot, counters: [{ name: "swarm_os_brain_boots_total", labels: { process: "brain" }, value }], gauges: [] });
+  const report = (v: number, at: string) => ({ r: "obs", name: "swarm_os_brain_metrics_report_seconds", v, t: t(at), labels: { process: "brain", source: "live", outcome: "ok" } });
+  writeFileSync(join(dir, "2026-10-24.jsonl"), jsonl([boots("a", "2026-10-24T23:00:00Z", 1), report(0.5, "2026-10-24T23:30:00Z"),
+    { r: "instance", instanceId: "inst-2", at: t("2026-10-24T22:00:00Z"), snapshot: snap([]) }]));
+  writeFileSync(join(dir, "2026-10-25.jsonl"), jsonl([boots("b", "2026-10-25T11:00:00Z", 1), report(0.25, "2026-10-25T11:30:00Z"),
+    { r: "instance", instanceId: "inst-1", at: t("2026-10-25T10:00:00Z"), snapshot: snap([h("swarm_git_command_seconds", 1)]) },
+    { r: "instance", instanceId: "inst-1", at: t("2026-10-25T11:45:00Z"), snapshot: snap([h("swarm_git_command_seconds", 2)]) }]));
+  const r = await bm.report({ since: t("2026-10-25T00:00:00Z") });
+  expect(counter(r.brain, "swarm_os_brain_boots_total")).toBe(1);      // boot b's start; boot a's last value came before the window
+  expect(hist(r.brain, "swarm_os_brain_metrics_report_seconds")).toMatchObject({ count: 1, sum: 0.25 });
+  expect([Object.keys(r.instances), r.instances["inst-1"].snapshot.histograms[0].sum]).toEqual([["inst-1"], 2]);
+});
+it("compact() carries the brain's ten largest sinks, every process gauge and each instance's three largest", async () => {
+  const { brainMetrics: bm } = testBrainMetrics();
+  for (let i = 1; i <= 12; i++) bm.metrics.observe("swarm_os_brain_collector_seconds", i, { collector: `c${i}`, outcome: "ok" });
+  bm.metrics.set("swarm_process_rss_bytes", 2048);
+  bm.instanceSource = { latest: () => ({ "inst-1": { at: 1, snapshot: snap([h("swarm_agent_api_seconds", 1), h("swarm_git_command_seconds", 4),
+    h("swarm_substrate_request_seconds", 3), h("swarm_merge_gate_seconds", 2)]) } }) };
+  const c = await bm.compact();
+  expect([c.at, c.top.length, c.top[0].labels.collector, c.process.map((g) => g.name)]).toEqual([T0.getTime(), 10, "c12", ["swarm_process_rss_bytes"]]);
+  expect(c.instances).toEqual([{ instanceId: "inst-1", top: ["swarm_git_command_seconds", "swarm_substrate_request_seconds", "swarm_merge_gate_seconds"].map((name) => expect.objectContaining({ name })) }]);
+});
+it("runs the collectors before each event and each snapshot, timing each, and keeps going when one throws", async () => {
+  const { brainMetrics: bm } = testBrainMetrics(); let runs = 0;
+  bm.addCollector("count", () => { runs += 1; });
+  bm.addCollector("broken", () => { throw new Error("boom"); });
+  await bm.compact(); await bm.flush();
+  expect(runs).toBe(2);
+  expect(hist(bm.snapshot(), "swarm_os_brain_collector_seconds", { collector: "broken", outcome: "error" })?.count).toBe(2);
+  expect(gauge(bm.snapshot(), "swarm_os_brain_uptime_seconds")).toBe(0);
+});
+it("broadcast writes an event without an id line to the streams it is visible to, outside the ring and the sequence", async () => {
+  const hub = new EventHub({ keepaliveMs: 60_000 });
+  const server = createServer((req, res) => { hub.attach(req, res, req.url === "/instance" ? { kind: "instance", instanceId: "inst-1" } : { kind: "host" }, { rooms: "all", hello: async () => ({}) }); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const seen: Array<{ id: number | null; type: string }> = [], inst: string[] = [];
+  const a = openEventStream(`${url}/`, { headers: {}, onEvent: (e) => seen.push(e) });
+  const b = openEventStream(`${url}/instance`, { headers: {}, onEvent: (e) => inst.push(e.type) });
+  await vi.waitFor(() => expect([seen[0]?.type, inst[0]]).toEqual(["hello", "hello"]));
+  const before = hub.publish((x) => x.kind === "host", { type: "instance", payload: {} });
+  await vi.waitFor(() => expect(seen).toHaveLength(2));
+  expect(hub.broadcast((x) => x.kind === "host", { type: "metrics", payload: { at: 1 } })).toBe(1);
+  await vi.waitFor(() => expect(seen.at(-1)).toEqual({ id: before.id, type: "metrics", data: { at: 1 } }));   // the parser keeps the last id: no id line was sent
+  expect([hub.latestId(), (hub.replayAfter(0, { kind: "host" }) as HubEvent[]).map((e) => e.type), inst]).toEqual([before.id, ["instance"], ["hello"]]);
+  a.close(); b.close(); hub.closeAll(); server.close();
+});
+it("filters by name prefix and reads since as a duration or an instant", () => {
+  const text = "# HELP swarm_a_total a\n# TYPE swarm_a_total counter\nswarm_a_total 1\n# HELP swarm_b_seconds b\n# TYPE swarm_b_seconds histogram\nswarm_b_seconds_bucket{le=\"+Inf\"} 1\nswarm_b_seconds_sum 1\nswarm_b_seconds_count 1\n";
+  expect(filterPrometheus(text, ["swarm_b_"])).toBe(text.slice(text.indexOf("# HELP swarm_b_seconds")));
+  expect(filterPrometheus(text)).toBe(text);
+  expect(filterSnapshot(snap([h("swarm_x_seconds", 1), h("swarm_y_seconds", 1)]), ["swarm_y_"]).histograms.map((x) => x.name)).toEqual(["swarm_y_seconds"]);
+  const now = T0.getTime();
+  expect([parseSince("90s", now), parseSince("15m", now), parseSince("2h", now), parseSince("1d", now), parseSince("2026-10-25T11:00:00.000Z", now)])
+    .toEqual([now - 90_000, now - 900_000, now - 7_200_000, now - 86_400_000, now - 3_600_000]);
+  for (const bad of ["", "10", "5w", "yesterday", "2027-01-01T00:00:00Z"]) expect(() => parseSince(bad, now), bad).toThrow(ApiError);
+});
+```
+`packages/os/tests/metrics/api-metrics.test.ts` (`f = await authFixture()`; `({ brainMetrics: bm } = testBrainMetrics({ clock: f.clock, extraDefs: [CLIENT_DEF] }))` with `CLIENT_DEF = { name: "swarm_os_client_test_seconds", kind: "histogram", unit: "seconds", help: "a client timing these tests declare", labels: ["client", "route"] }`; then `registerMetricsRoutes(f.server, { brainMetrics: bm, clock: f.clock })`; `obs(o)` is `{ r: "obs", name: "swarm_os_client_test_seconds", v: 0.25, t: T0.getTime(), labels: { route: "/api/rooms" }, ...o }`):
+```ts
+it("serves { brain, instances } to the host and a human, and refuses everyone else", async () => {
+  const empty = { at: 1, defs: [], counters: [], gauges: [], histograms: [] };
+  bm.instanceSource = { latest: () => ({ "inst-1": { at: 1, snapshot: empty } }) };
+  const host = await f.request("GET", "/api/metrics", { token: f.host });
+  expect([host.status, Object.keys(host.json).sort(), host.json.instances]).toEqual([200, ["brain", "instances"], { "inst-1": { at: 1, snapshot: empty } }]);
+  expect(host.json.brain.gauges).toEqual(expect.arrayContaining([expect.objectContaining({ name: "swarm_os_brain_uptime_seconds" })]));
+  const phone = await f.device("phone");
+  expect((await f.request("GET", "/api/metrics?names=swarm_os_brain_", { token: phone.token })).status).toBe(200);
+  expect((await f.request("GET", "/api/metrics")).status).toBe(401);
+  const { token, tokenHash } = mintInstanceToken(); await f.store.instances.put(instanceRow({ id: "inst-1", tokenHash }));
+  expect((await f.request("GET", "/api/metrics", { token })).json.error).toMatchObject({ code: "forbidden", reason: "wrong_actor_kind" });
+});
+it("answers Prometheus text for format=prometheus, filtered by names", async () => {
+  bm.metrics.inc("swarm_os_brain_boots_total");
+  const r = await rawRequest(`${f.url}/api/metrics?format=prometheus&names=swarm_os_brain_boots_`, { headers: { authorization: `Bearer ${f.host}` } });
+  expect([r.status, r.headers["content-type"], r.headers["cache-control"]]).toEqual([200, "text/plain; version=0.0.4; charset=utf-8", "no-store"]);
+  expect(r.text).toContain("# TYPE swarm_os_brain_boots_total counter");
+  expect(r.text).not.toContain("swarm_os_brain_uptime_seconds");
+});
+it("refuses a bad since, names or format, and since with Prometheus", async () => {
+  const reason = async (q: string) => (await f.request("GET", `/api/metrics?${q}`, { token: f.host })).json.error.reason;
+  expect([await reason("since=5w"), await reason("names=../etc"), await reason("format=xml"), await reason("format=prometheus&since=1h")])
+    .toEqual(["bad_since", "bad_names", "bad_format", "since_needs_json"]);
+});
+it("records client timings as web for the session cookie and tui for a bearer, the host's included", async () => {
+  const phone = await f.device("phone");
+  const web = await f.request("POST", "/api/metrics/client", { cookie: `${SESSION_COOKIE}=${phone.token}`, body: { records: [obs(), obs({ v: 0.75 })] } });
+  expect([web.status, web.json]).toEqual([200, { accepted: 2 }]);
+  await f.request("POST", "/api/metrics/client", { token: phone.token, body: { records: [obs()] } });
+  await f.request("POST", "/api/metrics/client", { token: f.host, body: { records: [obs()] } });
+  const s = bm.snapshot();
+  expect(hist(s, "swarm_os_client_test_seconds", { client: "web", route: "/api/rooms" })).toMatchObject({ count: 2, sum: 1 });
+  expect(hist(s, "swarm_os_client_test_seconds", { client: "tui" })?.count).toBe(2);
+  expect(counter(s, "swarm_os_client_records_total", { client: "web", outcome: "accepted" })).toBe(2);
+});
+it("refuses a whole batch for too many records, a foreign or undeclared name, a label it may not carry or a bad value, and records none of it", async () => {
+  const phone = await f.device("phone");
+  const cases: Array<[unknown[], string]> = [
+    [Array.from({ length: 501 }, () => obs()), "too_many_records"],
+    [[obs(), obs({ name: "swarm_os_http_request_seconds" })], "bad_name"],
+    [[obs({ name: "swarm_os_client_nope_seconds" })], "unknown_metric"],
+    [[obs({ labels: { route: "/api/rooms", path: "/x" } })], "bad_labels"],
+    [[obs({ labels: { route: "/api/rooms", client: "web" } })], "bad_labels"],   // the brain sets client
+    [[obs({ labels: { route: "a b" } })], "bad_labels"],
+    [[obs({ v: -1 })], "bad_value"],
+  ];
+  for (const [records, reason] of cases) {
+    const r = await f.request("POST", "/api/metrics/client", { token: phone.token, body: { records } });
+    expect([r.status, r.json.error.reason], reason).toEqual([400, reason]);
+  }
+  expect(hist(bm.snapshot(), "swarm_os_client_test_seconds")).toBeUndefined();
+  expect(counter(bm.snapshot(), "swarm_os_client_records_total", { client: "tui", outcome: "refused" })).toBe(508);
+  const { token, tokenHash } = mintInstanceToken(); await f.store.instances.put(instanceRow({ id: "inst-1", tokenHash }));
+  expect((await f.request("POST", "/api/metrics/client", { token, body: { records: [obs()] } })).status).toBe(403);
+});
+```
+`packages/os/tests/brain.test.ts`, one test added (Task 10's `start` and `fakeModule`; `brainMetrics` from `testBrainMetrics({ clock })`):
+```ts
+it("puts the registry in the context, reads instance snapshots through services.instanceMetrics, and streams them every five seconds", async () => {
+  const { brainMetrics } = testBrainMetrics({ clock });
+  const git = { name: "swarm_git_command_seconds", labels: { cmd: "fetch", outcome: "ok" }, unit: "seconds" as const, count: 1, sum: 3, min: 3, max: 3, p50: 3, p90: 3, p99: 3, buckets: [[Infinity, 1]] as Array<[number, number]> };
+  const latest = { "inst-1": { at: T0.getTime(), snapshot: { at: T0.getTime(), defs: [], counters: [], gauges: [], histograms: [git] } } };
+  const stop = vi.spyOn(brainMetrics, "stop");
+  const brain = await start({ metrics: brainMetrics, modules: [fakeModule("metrics-source", [], { onStart: (ctx) => { ctx.services.instanceMetrics = { put: () => {}, latest: () => latest }; } })] });
+  expect([brain.ctx.brainMetrics === brainMetrics, brain.ctx.metrics === brainMetrics.metrics, brain.ctx.metricsSink === brainMetrics.sink]).toEqual([true, true, true]);
+  expect(brain.periodics.list()).toEqual(expect.arrayContaining([{ name: "metrics_event", everyMs: 5_000 }]));
+  const host = { Authorization: `Bearer ${brain.ctx.auth.hostSecret.bearer()}` };
+  const events: Array<{ type: string; data: any }> = [];
+  const s = openEventStream(`${brain.url}/api/stream`, { headers: host, onEvent: (e) => events.push(e as never) });
+  await vi.waitFor(() => expect(events[0]?.type).toBe("hello"));
+  await brain.periodics.runNow("metrics_event");
+  await vi.waitFor(() => expect(events.find((e) => e.type === "metrics")?.data.instances).toEqual([{ instanceId: "inst-1", top: [expect.objectContaining({ name: "swarm_git_command_seconds" })] }]));
+  expect(Object.keys((await (await fetch(`${brain.url}/api/metrics`, { headers: host })).json()).instances)).toEqual(["inst-1"]);
+  s.close(); await brain.stop();
+  expect(stop).toHaveBeenCalledTimes(1);
+});
+```
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Run: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run tests/config.test.ts tests/metrics/brain-metrics.test.ts tests/metrics/api-metrics.test.ts tests/brain.test.ts`
+Expected: FAIL, `Cannot find module '../src/brain/metrics.js'`, and `config.test.ts` fails on the missing `metrics` path and block.
+
+- [ ] **Step 3: Implement**
+
+- The config block, `RESTART_REQUIRED_KEYS`, `OsPaths.metrics` (`join(home, "metrics")`) and `defaultOsConfig`'s `metrics: { retain_days: 14 }`, so the owner finds the setting in the file.
+- `brain/metrics.ts` and `api/metrics-routes.ts` to the Interfaces and rules above. `BrainMetrics` makes `dir` with `mkdirSync(dir, { recursive: true, mode: 0o700 })` when it owns a sink. Its `sink` is that `JsonlMetricsSink` typed as `BrainMetricsSink` (a method parameter, so the wider record type assigns), else `{ write() {} }`: the brain's file holds plan 10's three record kinds plus plan 04's `instance` records (at most one per instance every five minutes, and one at its end), and `report` sets the `instance` ones aside before `aggregate` sees the rest.
+- `EventHub.broadcast` with the rule above; `Brain.start` and `Brain.stop` as listed.
+- Append the five catalogue entries above in the plan 03 slot of `packages/metrics/src/catalogue/os.ts`, and to the plan 03 block of `src/index.ts`: `BrainMetrics`, `brainMetricsClock`, `dayFile`, `filterSnapshot`, `filterPrometheus`, `parseSince`, `registerMetricsRoutes`, the three constants and the types `InstanceMetricsEntry`, `InstanceMetricsPort`, `InstanceSnapshotRecord`, `BrainMetricsSink`, `MetricsReport` and `CompactMetrics`.
+
+- [ ] **Step 4: Run the package suites and the build**
+
+Run: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run && cd ../metrics && npx vitest run && cd ../.. && pnpm --filter @mnmal-ai/swarm-os build`
+Expected: PASS, plan 10's `catalogue.test.ts` included (names unique, suffixes right, no forbidden label); `tsc` exits 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/brain packages/os/src/api/metrics-routes.ts packages/os/src/config packages/os/src/sse/hub.ts packages/os/src/index.ts packages/metrics/src/catalogue/os.ts packages/os/tests/metrics/brain-metrics.test.ts packages/os/tests/metrics/api-metrics.test.ts packages/os/tests/helpers/brain-metrics.ts packages/os/tests/config.test.ts packages/os/tests/brain.test.ts
+git -c commit.gpgsign=false commit -m "feat(os): the brain's metrics registry, GET /api/metrics, client timings and the SSE metrics event"
+```
+
+---
+
+### Task 15: Metrics: every request, stream, credential check, periodic task and start-up phase
+
+**Files:**
+- Modify: `packages/os/src/api/server.ts`, `packages/os/src/api/router.ts` (`ApiRequest.route`, `match` returns the pattern, `idempotent()` counts replays), `packages/os/src/sse/hub.ts`, `packages/os/src/sse/client.ts`, `packages/os/src/api/auth-middleware.ts`, `packages/os/src/auth/hooks.ts`, `packages/os/src/auth/sessions.ts`, `packages/os/src/auth/stepup.ts`, `packages/os/src/auth/passkeys.ts`, `packages/os/src/auth/index.ts`, `packages/os/src/brain/periodic.ts`, `packages/os/src/brain/reconcile.ts`, `packages/os/src/brain/open-store.ts`, `packages/os/src/brain/brain.ts`, `packages/os/src/brain/parts.ts` and `packages/os/src/brain/builtin-modules.ts` (the handle for plans 06 and 08), `packages/metrics/src/catalogue/os.ts` (the plan 03 slot, after Task 14's entries), `packages/os/tests/helpers/api-fixture.ts` and `packages/os/tests/helpers/auth-fixture.ts` (a `metrics` option each)
+- Test: `packages/os/tests/metrics/brain-instrumentation.test.ts`; Modify `packages/os/tests/auth-passkeys.test.ts` (one test added), `packages/os/tests/brain.test.ts` (two tests added) and `packages/os/tests/brain-composition.test.ts` (one test added)
+
+**Interfaces:**
+- Consumes: Task 14 (`BrainMetrics`, `testBrainMetrics`); `Metrics`, `noopMetrics`, `processMetrics`, `testRegistry`, `CATALOGUE` (plan 10); Tasks 3 to 10 of this plan; from plan 02's metrics task, the `metrics?: Metrics` option of `new SubstrateOsStore(client, { metrics })`, `JournalOptions`, `JournaledStoreOptions` and `EnsureOsStackOptions`, and the test helpers `hist`, `counter` and `gauge` (`packages/os/tests/metrics/helpers.ts`).
+- Produces (every `metrics` option defaults to `noopMetrics`, except `openEventStream`'s):
+```ts
+// packages/os/src/api/server.ts
+export interface ApiServerDeps { /* … */ metrics?: Metrics }
+// packages/os/src/api/router.ts
+export interface ApiRequest { /* … */ route: string }            // the matched route pattern; "unmatched" when no route matched
+Router.match(method: string, pathname: string): { chain: Handler[]; params: Record<string, string>; path: string } | null;
+// packages/os/src/sse/hub.ts
+new EventHub({ /* … */ metrics?: Metrics });
+// packages/os/src/sse/client.ts
+openEventStream(url, { /* … */ metrics?: Metrics });             // default processMetrics(), read at call time: the caller's registry (a run's, the TUI's), never the brain's
+// packages/os/src/api/auth-middleware.ts, auth/hooks.ts, auth/sessions.ts, auth/stepup.ts, auth/passkeys.ts
+new Authenticator({ /* … */ metrics?: Metrics }); defaultAuthHooks({ /* … */ metrics?: Metrics });
+new Sessions({ /* … */ metrics?: Metrics }); new StepUps({ /* … */ metrics?: Metrics }); new Passkeys({ /* … */ metrics?: Metrics });
+// packages/os/src/auth/index.ts
+createAuthServices({ /* … */ metrics?: Metrics });                // hands it to each of the five above
+// packages/os/src/brain/periodic.ts
+new Periodics({ /* … */ metrics?: Metrics; now?: () => number }); // now: monotonic milliseconds, default performance.now()
+// packages/os/src/brain/reconcile.ts
+reconcile({ /* … */ metrics?: Metrics });
+// packages/os/src/brain/open-store.ts
+openOsStore(config, paths, log, ensure?, metrics?: Metrics);    // passes metrics to ensureOsStack and to SubstrateOsStore
+// packages/os/src/brain/parts.ts (Task 11's ports)
+export interface CosWiringDeps { /* … */ metrics: Metrics }       // plan 06's createChiefOfStaff records the chief of staff's rows with it
+export interface BrainParts { /* … */ CliLogins?: new (deps: { /* … */ metrics?: Metrics }) => unknown }   // plan 08's CliLoginDeps.metrics
+// packages/os/tests/helpers
+apiFixture({ /* … */ metrics?: Metrics }); authFixture({ /* … */ metrics?: Metrics });   // to ApiServer, EventHub, Sessions, Authenticator and the hooks; authFixture through createAuthServices
+```
+
+Catalogue rows this task adds, and where each is recorded. `route` is a route pattern (`/api/rooms/:id/messages`, `/assets/*`) or `unmatched`, never a path; `status_class` is `2xx`, `3xx`, `4xx` or `5xx`; `stream` is `events` (`GET /api/stream`) or `instance` (`GET /api/instances/:id/stream`), from the actor's kind.
+
+| Name | Kind | Unit | Labels | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_http_request_seconds` | histogram | seconds | `route`, `method`, `status_class`, `outcome` (`ok` below 400, `refused` 4xx, `error` 5xx) | `ApiServer`: a span from the request's arrival to the response's `finish`, or to the end of the handler chain for a response still open (an event stream) |
+| `swarm_os_http_requests_in_flight` | gauge | count | | `ApiServer`: up on arrival, down on `finish` or `close` |
+| `swarm_os_http_request_bytes` | histogram | bytes | `route`, `method` | `ApiServer`: the body it read, for `POST`, `PUT`, `PATCH` and `DELETE` |
+| `swarm_os_http_response_bytes` | histogram | bytes | `route`, `method` | `ApiServer`: bytes passed to `res.write` and `res.end`, at the same moment as the request span |
+| `swarm_os_http_errors_total` | counter | count | `route`, `code` (an `ApiErrorCode`, or `internal`) | `ApiServer`: every error envelope it sends, the guards' refusals included |
+| `swarm_os_http_idempotent_replays_total` | counter | count | `route` | `idempotent()`: each answer replayed from the key cache |
+| `swarm_os_sse_clients` | gauge | count | `stream` | `EventHub.attach` and the stream's detach |
+| `swarm_os_sse_stream_seconds` | histogram | seconds | `stream`, `outcome` (`client`, `invalid`, `backpressure`, `server`) | `EventHub`: a span from attach to close; `invalid` is a failed keepalive `validate`, `backpressure` the 1 MiB rule, `server` `closeWhere` or `closeAll` |
+| `swarm_os_sse_hello_seconds` | histogram | seconds | `stream`, `outcome` | `EventHub.attach`, around `hello()` (it reads the store) |
+| `swarm_os_sse_events_published_total` | counter | count | `type` | `EventHub.publish` |
+| `swarm_os_sse_publish_seconds` | histogram | seconds | `type`, `outcome` | `EventHub.publish`, the fan-out over the attached streams |
+| `swarm_os_sse_deliveries_total` | counter | count | `type`, `stream` | `EventHub`: each event written to a stream, live, replayed or broadcast |
+| `swarm_os_sse_replayed_total` | counter | count | `stream` | `EventHub.attach`: events replayed after `Last-Event-ID` |
+| `swarm_os_sse_gaps_total` | counter | count | `stream` | `EventHub.attach`: each `gap` sent |
+| `swarm_os_sse_backpressure_total` | counter | count | `stream` | `EventHub`: each `res.write` that returned `false` |
+| `swarm_os_sse_written_bytes_total` | counter | bytes | `stream` | `EventHub`: bytes of every hello, event, broadcast and keepalive written |
+| `swarm_os_sse_seq_write_seconds` | histogram | seconds | `outcome` | `EventHub`: each `seqFile` write (timer and `flush()`) |
+| `swarm_os_sse_client_connect_seconds` | histogram | seconds | `outcome` (`ok`, `auth_refused`, `http_error`, `network_error`) | `openEventStream`, in the caller's registry: from `fetch` to a 200's headers or to the failure |
+| `swarm_os_sse_client_reconnects_total` | counter | count | `reason` (`ended`, `http_error`, `network_error`) | `openEventStream`: each reconnect it schedules |
+| `swarm_os_auth_check_seconds` | histogram | seconds | `scheme` (`cookie`, `session`, `instance`, `room`, `host`, `none`, `unknown`), `outcome` (`ok` or the refusal code) | `Authenticator.authenticate`; `session` is a `sess_` bearer, `unknown` a bearer `tokenKind` cannot read |
+| `swarm_os_auth_refusals_total` | counter | count | `code`, `reason` | `Authenticator.authenticate`: each refusal, with its `reason` (`missing_credentials`, `token_invalid`, `wrong_actor_kind`, `host_not_loopback`, `session_invalid`, `lockdown`) |
+| `swarm_os_auth_sessions_issued_total` | counter | count | `client` (`web`, `cli`) | `Sessions.issueSession` |
+| `swarm_os_auth_sessions_revoked_total` | counter | count | `scope` (`session`, `device`, `all`) | `Sessions.revoke`, `revokeForDevice`, `revokeAll`, by the number revoked |
+| `swarm_os_auth_cooldowns_total` | counter | count | `trigger` (`new_address`, `stepup_failed`) | `defaultAuthHooks`, each cool-down it starts (plans 05 and 09 replace these hooks and count their own) |
+| `swarm_os_auth_passkey_seconds` | histogram | seconds | `ceremony` (`register_options`, `register_verify`, `login_options`, `login_verify`), `outcome` (`ok`, `pending`, or the `ApiError` code) | `Passkeys`, its four methods |
+| `swarm_os_auth_stepups_issued_total` | counter | count | `requester` (`human`, `host`, `cos`) | `StepUps.issue`, from the session id (`HOST_SESSION_ID`, `COS_SESSION_ID`, else human) |
+| `swarm_os_auth_stepup_seconds` | histogram | seconds | `outcome` (`confirmed`, `wrong_code`, `expired`, `locked`, `consumed`, `not_allowed`) | `StepUps.confirm`: `now − issuedAt` by the brain's clock, for every attempt on an existing row |
+| `swarm_os_brain_periodic_seconds` | histogram | seconds | `task`, `outcome` | `Periodics`, each run |
+| `swarm_os_brain_periodic_lag_seconds` | histogram | seconds | `task` | `Periodics`: how late each run started against its schedule (the run at start counts 0) |
+| `swarm_os_brain_periodic_skipped_total` | counter | count | `task` | `Periodics`: a tick that found the previous run still in flight |
+| `swarm_os_brain_start_phase_seconds` | histogram | seconds | `phase` (`open_store`, `replay`, `warm_snapshot`, `auth`, `routes`, `modules`, `reconcile`, `listen`), `outcome` | `Brain.start`; `open_store` only when the brain opens the store itself, `reconcile` only when it runs plan 03's own |
+| `swarm_os_brain_module_seconds` | histogram | seconds | `module`, `step` (`start`, `stop`), `outcome` | `Brain.start` step 9 and `Brain.stop` |
+| `swarm_os_brain_reconcile_rows_total` | counter | count | `result` (`kept`, `gone`, `paused_gone`, `unknown`) | `reconcile`, from its report |
+| `swarm_os_brain_reconcile_status_seconds` | histogram | seconds | `outcome` (`running`, `gone`, `error`, `timeout`) | `reconcile`: each `launcher.status` it asks |
+| `swarm_os_brain_reloads_total` | counter | count | `outcome` (`applied`, `refused`) | `Brain.reload` |
+
+```ts
+  // Task 15: requests, streams, credentials, periodic tasks and start-up
+  { name: "swarm_os_http_request_seconds", kind: "histogram", unit: "seconds", help: "Brain API request time, by route pattern, method and status class", labels: ["route", "method", "status_class", "outcome"] },
+  { name: "swarm_os_http_requests_in_flight", kind: "gauge", unit: "count", help: "Brain API requests being handled now", labels: [] },
+  { name: "swarm_os_http_request_bytes", kind: "histogram", unit: "bytes", help: "Brain API request body size", labels: ["route", "method"] },
+  { name: "swarm_os_http_response_bytes", kind: "histogram", unit: "bytes", help: "Brain API response body size", labels: ["route", "method"] },
+  { name: "swarm_os_http_errors_total", kind: "counter", unit: "count", help: "Error envelopes the brain API sent, by code", labels: ["route", "code"] },
+  { name: "swarm_os_http_idempotent_replays_total", kind: "counter", unit: "count", help: "Answers replayed for a repeated Idempotency-Key", labels: ["route"] },
+  { name: "swarm_os_sse_clients", kind: "gauge", unit: "count", help: "Event streams attached now", labels: ["stream"] },
+  { name: "swarm_os_sse_stream_seconds", kind: "histogram", unit: "seconds", help: "Event stream lifetime, by how it closed", labels: ["stream", "outcome"] },
+  { name: "swarm_os_sse_hello_seconds", kind: "histogram", unit: "seconds", help: "Time to build a stream's hello", labels: ["stream", "outcome"] },
+  { name: "swarm_os_sse_events_published_total", kind: "counter", unit: "count", help: "Events published to the hub", labels: ["type"] },
+  { name: "swarm_os_sse_publish_seconds", kind: "histogram", unit: "seconds", help: "Time to fan one event out to the attached streams", labels: ["type", "outcome"] },
+  { name: "swarm_os_sse_deliveries_total", kind: "counter", unit: "count", help: "Events written to a stream, live, replayed or broadcast", labels: ["type", "stream"] },
+  { name: "swarm_os_sse_replayed_total", kind: "counter", unit: "count", help: "Events replayed after Last-Event-ID", labels: ["stream"] },
+  { name: "swarm_os_sse_gaps_total", kind: "counter", unit: "count", help: "gap events sent for an id the ring no longer holds", labels: ["stream"] },
+  { name: "swarm_os_sse_backpressure_total", kind: "counter", unit: "count", help: "Stream writes that hit backpressure", labels: ["stream"] },
+  { name: "swarm_os_sse_written_bytes_total", kind: "counter", unit: "bytes", help: "Bytes written to event streams", labels: ["stream"] },
+  { name: "swarm_os_sse_seq_write_seconds", kind: "histogram", unit: "seconds", help: "Time to persist the event sequence", labels: ["outcome"] },
+  { name: "swarm_os_sse_client_connect_seconds", kind: "histogram", unit: "seconds", help: "openEventStream connection time, by outcome, in the caller's process", labels: ["outcome"] },
+  { name: "swarm_os_sse_client_reconnects_total", kind: "counter", unit: "count", help: "openEventStream reconnects, by reason, in the caller's process", labels: ["reason"] },
+  { name: "swarm_os_auth_check_seconds", kind: "histogram", unit: "seconds", help: "Credential check time, by scheme and outcome", labels: ["scheme", "outcome"] },
+  { name: "swarm_os_auth_refusals_total", kind: "counter", unit: "count", help: "Credential refusals, by code and reason", labels: ["code", "reason"] },
+  { name: "swarm_os_auth_sessions_issued_total", kind: "counter", unit: "count", help: "Human sessions issued, by client", labels: ["client"] },
+  { name: "swarm_os_auth_sessions_revoked_total", kind: "counter", unit: "count", help: "Human sessions revoked, by scope", labels: ["scope"] },
+  { name: "swarm_os_auth_cooldowns_total", kind: "counter", unit: "count", help: "Cool-downs the default auth hooks started", labels: ["trigger"] },
+  { name: "swarm_os_auth_passkey_seconds", kind: "histogram", unit: "seconds", help: "Passkey ceremony time, by ceremony and outcome", labels: ["ceremony", "outcome"] },
+  { name: "swarm_os_auth_stepups_issued_total", kind: "counter", unit: "count", help: "Step-ups issued, by who asked", labels: ["requester"] },
+  { name: "swarm_os_auth_stepup_seconds", kind: "histogram", unit: "seconds", help: "Time from a step-up's issue to each attempt to confirm it, by outcome", labels: ["outcome"] },
+  { name: "swarm_os_brain_periodic_seconds", kind: "histogram", unit: "seconds", help: "Periodic task run time", labels: ["task", "outcome"] },
+  { name: "swarm_os_brain_periodic_lag_seconds", kind: "histogram", unit: "seconds", help: "How late a periodic run started against its schedule", labels: ["task"] },
+  { name: "swarm_os_brain_periodic_skipped_total", kind: "counter", unit: "count", help: "Periodic ticks skipped because the previous run was still going", labels: ["task"] },
+  { name: "swarm_os_brain_start_phase_seconds", kind: "histogram", unit: "seconds", help: "Brain start-up time, by phase", labels: ["phase", "outcome"] },
+  { name: "swarm_os_brain_module_seconds", kind: "histogram", unit: "seconds", help: "Brain module start and stop time", labels: ["module", "step", "outcome"] },
+  { name: "swarm_os_brain_reconcile_rows_total", kind: "counter", unit: "count", help: "Live instance rows reconciled at start, by result", labels: ["result"] },
+  { name: "swarm_os_brain_reconcile_status_seconds", kind: "histogram", unit: "seconds", help: "Launcher status asks during reconcile, by answer", labels: ["outcome"] },
+  { name: "swarm_os_brain_reloads_total", kind: "counter", unit: "count", help: "os.json reloads, applied or refused", labels: ["outcome"] },
+```
+
+Not instrumented, on purpose: `swarm os init|start|stop|status|install|uninstall|lockdown|confirm` (Task 13), `initOsHome`, the Tailscale calls and the supervisor commands are one-shot processes with no registry; the brain's side of every call they make is measured by the HTTP rows above.
+
+- [ ] **Step 1: Write the failing tests**
+
+`packages/os/tests/metrics/brain-instrumentation.test.ts` (per test: `({ registry } = testBrainMetrics())`, `metrics = registry.with({ process: "brain" })`, `f = await apiFixture({ metrics })`, `s = () => registry.snapshot()`; the `auth` block adds `GET /api/t/who` with `requireAuth(["human", "host"])` answering `req.actor`):
+```ts
+describe("HTTP", () => {
+  it("times each request by route pattern, method and status class, counts the error envelopes, and returns in-flight to zero", async () => {
+    f.server.route("GET", "/api/t/rooms/:id", () => ({ ok: true }));
+    f.server.route("GET", "/api/t/crash", () => { throw new Error("boom"); });
+    await f.request("GET", "/api/t/rooms/room-1"); await f.request("GET", "/api/t/rooms/room-2");
+    await f.request("GET", "/nope"); await f.request("GET", "/api/t/crash");
+    expect(hist(s(), "swarm_os_http_request_seconds", { route: "/api/t/rooms/:id", method: "GET", status_class: "2xx", outcome: "ok" })?.count).toBe(2);
+    expect(hist(s(), "swarm_os_http_request_seconds", { route: "unmatched", status_class: "4xx", outcome: "refused" })?.count).toBe(1);
+    expect([counter(s(), "swarm_os_http_errors_total", { route: "unmatched", code: "not_found" }), counter(s(), "swarm_os_http_errors_total", { route: "/api/t/crash", code: "internal" })]).toEqual([1, 1]);
+    expect(gauge(s(), "swarm_os_http_requests_in_flight")).toBe(0);
+    expect(JSON.stringify(s())).not.toContain("room-1");      // patterns, never paths
+  });
+  it("sizes request and response bodies and counts idempotent replays", async () => {
+    f.server.route("POST", "/api/t/once", requireAuth("host"), idempotent(), () => ({ done: true }));
+    const send = () => f.request("POST", "/api/t/once", { token: f.hostSecret.bearer(), body: { a: 1 }, headers: { "idempotency-key": "k-1" } });
+    await send(); await send();
+    expect(hist(s(), "swarm_os_http_request_bytes", { route: "/api/t/once", method: "POST" })).toMatchObject({ count: 2, sum: 14 });     // {"a":1}
+    expect(hist(s(), "swarm_os_http_response_bytes", { route: "/api/t/once", method: "POST" })).toMatchObject({ count: 2, sum: 26 });    // {"done":true}
+    expect(counter(s(), "swarm_os_http_idempotent_replays_total", { route: "/api/t/once" })).toBe(1);
+  });
+});
+describe("SSE", () => {
+  it("counts clients by stream, publishes and deliveries by type, the hello, and a stream's life by how it closed", async () => {
+    const h = await f.human();
+    const st = openEventStream(`${f.url}/api/stream`, { headers: { Authorization: `Bearer ${h.token}` }, onEvent: () => {} });
+    await vi.waitFor(() => expect(gauge(s(), "swarm_os_sse_clients", { stream: "events" })).toBe(1));
+    f.hub.publish(() => true, { type: "decision", payload: {} }); f.hub.publish(() => false, { type: "decision", payload: {} });
+    await vi.waitFor(() => expect(counter(s(), "swarm_os_sse_deliveries_total", { type: "decision", stream: "events" })).toBe(1));
+    expect([counter(s(), "swarm_os_sse_events_published_total", { type: "decision" }), hist(s(), "swarm_os_sse_publish_seconds", { type: "decision", outcome: "ok" })?.count,
+      hist(s(), "swarm_os_sse_hello_seconds", { stream: "events", outcome: "ok" })?.count]).toEqual([2, 2, 1]);
+    expect(f.hub.closeWhere(() => true)).toBe(1); st.close();
+    await vi.waitFor(() => expect(hist(s(), "swarm_os_sse_stream_seconds", { stream: "events", outcome: "server" })?.count).toBe(1));
+    expect([gauge(s(), "swarm_os_sse_clients", { stream: "events" }), counter(s(), "swarm_os_sse_written_bytes_total", { stream: "events" }) > 0]).toEqual([0, true]);
+  });
+  it("counts events replayed after Last-Event-ID, and gaps for an id it cannot replay", async () => {
+    const h = await f.human(); const seen: string[] = [];
+    const z = f.hub.publish(() => true, { type: "instance", payload: {} });
+    f.hub.publish(() => true, { type: "instance", payload: {} }); f.hub.publish(() => true, { type: "instance", payload: {} });
+    const one = openEventStream(`${f.url}/api/stream`, { headers: { Authorization: `Bearer ${h.token}` }, lastEventId: z.id, onEvent: (e) => seen.push(e.type) });
+    await vi.waitFor(() => expect(seen).toEqual(["hello", "instance", "instance"]));
+    one.close();
+    const two = openEventStream(`${f.url}/api/stream`, { headers: { Authorization: `Bearer ${h.token}` }, lastEventId: f.hub.latestId() + 5, onEvent: (e) => seen.push(e.type) });
+    await vi.waitFor(() => expect(seen.at(-1)).toBe("gap"));
+    two.close();
+    expect([counter(s(), "swarm_os_sse_replayed_total", { stream: "events" }), counter(s(), "swarm_os_sse_gaps_total", { stream: "events" })]).toEqual([2, 1]);
+  });
+  it("counts writes that hit backpressure and closes a stream past 1 MiB buffered", async () => {
+    const hub = new EventHub({ keepaliveMs: 60_000, metrics });
+    const req = Object.assign(new EventEmitter(), { headers: {}, socket: { setNoDelay() {}, setTimeout() {} } }); const res = Object.assign(new EventEmitter(), { writableLength: 0, headersSent: false, writeHead() { return res; }, flushHeaders() {},
+      socket: { setNoDelay() {}, setTimeout() {} }, write(chunk: string) { res.writableLength += Buffer.byteLength(chunk); return false; }, end() { res.emit("close"); } });
+    hub.attach(req as never, res as never, { kind: "host" }, { rooms: "all", hello: async () => ({}) });
+    await vi.waitFor(() => expect(counter(s(), "swarm_os_sse_backpressure_total", { stream: "events" })).toBeGreaterThan(0));
+    hub.publish(() => true, { type: "probe", payload: { big: "x".repeat(2 * 1024 * 1024) } });
+    await vi.waitFor(() => expect(hist(s(), "swarm_os_sse_stream_seconds", { stream: "events", outcome: "backpressure" })?.count).toBe(1));
+  });
+  it("times openEventStream's connections by outcome and counts its reconnects, in the caller's registry", async () => {
+    const h = await f.human(); let opened = 0; const client = testRegistry(CATALOGUE).metrics;
+    const st = openEventStream(`${f.url}/api/stream`, { headers: { Authorization: `Bearer ${h.token}` }, onEvent: () => {}, onOpen: () => { opened += 1; }, backoffMs: [10, 10], metrics: client });
+    await vi.waitFor(() => expect(opened).toBe(1));
+    f.hub.closeWhere(() => true);
+    await vi.waitFor(() => expect(opened).toBe(2));
+    st.close();
+    const refused = openEventStream(`${f.url}/api/stream`, { headers: { Authorization: "Bearer sess_nope" }, onEvent: () => {}, onError: () => {}, metrics: client });
+    await vi.waitFor(() => expect(hist(client.snapshot(), "swarm_os_sse_client_connect_seconds", { outcome: "auth_refused" })?.count).toBe(1));
+    refused.close();
+    expect([hist(client.snapshot(), "swarm_os_sse_client_connect_seconds", { outcome: "ok" })?.count, counter(client.snapshot(), "swarm_os_sse_client_reconnects_total", { reason: "ended" })]).toEqual([2, 1]);
+  });
+});
+describe("auth", () => {
+  it("times credential checks by scheme and outcome, and counts refusals by code and reason", async () => {
+    const h = await f.human();
+    for (const o of [{}, { token: h.token }, { cookie: `${SESSION_COOKIE}=${h.token}` }, { token: f.hostSecret.bearer() }, { token: "bogus" }]) await f.request("GET", "/api/t/who", o);
+    const n = (scheme: string, outcome: string) => hist(s(), "swarm_os_auth_check_seconds", { scheme, outcome })?.count;
+    expect([n("none", "unauthenticated"), n("session", "ok"), n("cookie", "ok"), n("host", "ok"), n("unknown", "unauthenticated")]).toEqual([1, 1, 1, 1, 1]);
+    expect(["missing_credentials", "token_invalid"].map((reason) => counter(s(), "swarm_os_auth_refusals_total", { code: "unauthenticated", reason }))).toEqual([1, 1]);
+  });
+  it("counts sessions issued by client and revoked by scope, and the new-address cool-down", async () => {
+    await f.store.devices.put(deviceRow({ id: "dev-9" }));
+    const a = await f.sessions.issueSession({ humanId: "part-owner", deviceId: "dev-9", address: "100.64.0.7", client: "cli" });
+    await f.sessions.issueSession({ humanId: "part-owner", deviceId: "dev-9", address: "100.64.0.7", client: "web" });
+    await f.request("GET", "/api/t/who", { token: a.token });                 // from 127.0.0.1: a new address
+    await f.sessions.revoke(a.session.id); await f.sessions.revokeAll();
+    expect([counter(s(), "swarm_os_auth_sessions_issued_total", { client: "cli" }), counter(s(), "swarm_os_auth_sessions_issued_total", { client: "web" })]).toEqual([1, 1]);
+    expect(["session", "all"].map((scope) => counter(s(), "swarm_os_auth_sessions_revoked_total", { scope }))).toEqual([1, 1]);
+    expect(counter(s(), "swarm_os_auth_cooldowns_total", { trigger: "new_address" })).toBe(1);
+  });
+  it("counts step-ups by requester and times issue to each confirmation attempt by outcome", async () => {
+    const stepUps = new StepUps({ store: f.store, clock: f.clock, config: f.config, hostSecret: f.hostSecret, metrics });
+    const one = await stepUps.issue(HOST_SESSION_ID, ["devices", "revoke", "dev-1"]);
+    f.clock.advance(30_000); await stepUps.confirm(one.stepUpId, one.code === "000000" ? "000001" : "000000", { kind: "host" });
+    f.clock.advance(15_000); await stepUps.confirm(one.stepUpId, one.code, { kind: "host" });
+    const two = await stepUps.issue(COS_SESSION_ID, ["lockdown", "release"]);
+    f.clock.advance(121_000); await stepUps.confirm(two.stepUpId, two.code, { kind: "host" });
+    expect(["host", "cos"].map((requester) => counter(s(), "swarm_os_auth_stepups_issued_total", { requester }))).toEqual([1, 1]);
+    expect([hist(s(), "swarm_os_auth_stepup_seconds", { outcome: "wrong_code" }), hist(s(), "swarm_os_auth_stepup_seconds", { outcome: "confirmed" }),
+      hist(s(), "swarm_os_auth_stepup_seconds", { outcome: "expired" })].map((x) => [x?.count, x?.sum])).toEqual([[1, 30], [1, 45], [1, 121]]);
+  });
+});
+describe("periodic tasks", () => {
+  it("times each run and its lag behind schedule, and counts skipped ticks", async () => {
+    let now = 0; let release!: () => void;
+    const timers = { calls: [] as Array<{ fn: () => void; ms: number }>, setInterval(fn: () => void, ms: number) { this.calls.push({ fn, ms }); return this.calls.length; }, clearInterval() {} };
+    const flush = () => new Promise((r) => setImmediate(r));
+    const p = new Periodics({ log: testLog(), timers, metrics, now: () => now });
+    p.add({ name: "slow", everyMs: 1000, run: () => new Promise<void>((r) => { release = r; }) });
+    p.add({ name: "bad", everyMs: 1000, run: async () => { throw new Error("boom"); } });
+    p.start(); release(); await flush();
+    now = 1_250; timers.calls[0].fn();                 // 250 ms late
+    now = 2_000; timers.calls[0].fn();                 // still in flight: skipped
+    release(); await flush(); timers.calls[1].fn(); await flush();
+    expect(hist(s(), "swarm_os_brain_periodic_lag_seconds", { task: "slow" })).toMatchObject({ count: 2, sum: 0.25 });
+    expect([counter(s(), "swarm_os_brain_periodic_skipped_total", { task: "slow" }), hist(s(), "swarm_os_brain_periodic_seconds", { task: "slow", outcome: "ok" })?.count,
+      hist(s(), "swarm_os_brain_periodic_seconds", { task: "bad", outcome: "error" })?.count]).toEqual([1, 2, 2]);
+  });
+});
+```
+`packages/os/tests/auth-passkeys.test.ts`, one test added (the Task 7 fixture, with a second `Passkeys` built from its dependencies plus `metrics`):
+```ts
+it("times passkey ceremonies by ceremony and outcome", async () => {
+  const { registry } = testBrainMetrics();
+  const p = new Passkeys({ store, config, clock, sessions, lockdown, hostSecret, bootstrapPath: paths.bootstrap, enrolments, webauthn, metrics: registry.with({ process: "brain" }) });
+  const start = await p.registrationOptions({ deviceName: "phone", enrolment: enrolToken, address: "x" }) as Extract<RegistrationStart, { kind: "options" }>;
+  await p.verifyRegistration({ enrolmentId: start.enrolmentId, response: registrationResponse("cred-1", start.options.challenge), address: "x" });
+  await p.registrationOptions({ deviceName: "laptop", address: "x" });
+  const login = await p.loginOptions();
+  await p.verifyLogin({ response: authenticationResponse("cred-9", login.challenge), address: "x" }).catch(() => {});
+  const n = (ceremony: string, outcome: string) => hist(registry.snapshot(), "swarm_os_auth_passkey_seconds", { ceremony, outcome })?.count;
+  expect([n("register_options", "ok"), n("register_verify", "ok"), n("register_options", "pending"), n("login_options", "ok"), n("login_verify", "unauthenticated")]).toEqual([1, 1, 1, 1, 1]);
+});
+```
+`packages/os/tests/brain.test.ts`, two tests added (Task 10's `start`, `fakeModule`, `store`, `launcher`, `paths`; `({ brainMetrics, registry } = testBrainMetrics({ clock }))`):
+```ts
+it("times the start phases and each module's start and stop, and counts reconcile rows, status asks and reloads", async () => {
+  await store.instances.put(instanceRow({ id: "inst-1" })); await store.instances.put(instanceRow({ id: "inst-2" }));
+  launcher.statuses.set("inst-1", "running");
+  const brain = await start({ metrics: brainMetrics, modules: [fakeModule("a", [])] });
+  await brain.reload();
+  writeFileSync(paths.config, "{", { mode: 0o600 }); await brain.reload();
+  await brain.stop();
+  const s = registry.snapshot();
+  for (const phase of ["replay", "warm_snapshot", "auth", "routes", "modules", "reconcile", "listen"]) expect(hist(s, "swarm_os_brain_start_phase_seconds", { phase, outcome: "ok" })?.count, phase).toBe(1);
+  expect(["start", "stop"].map((step) => hist(s, "swarm_os_brain_module_seconds", { module: "a", step, outcome: "ok" })?.count)).toEqual([1, 1]);
+  expect(["kept", "gone"].map((result) => counter(s, "swarm_os_brain_reconcile_rows_total", { result }))).toEqual([1, 1]);
+  expect(["running", "gone"].map((outcome) => hist(s, "swarm_os_brain_reconcile_status_seconds", { outcome })?.count)).toEqual([1, 1]);
+  expect(["applied", "refused"].map((outcome) => counter(s, "swarm_os_brain_reloads_total", { outcome }))).toEqual([1, 1]);
+  expect(hist(s, "swarm_os_http_request_seconds")).toBeUndefined();    // nothing called the API in this test
+});
+it("hands its handle to plan 02's journal and journaled store, so an outage shows in their rows", async () => {
+  const sw = switchableStore(new MemoryOsStore());
+  const brain = await start({ store: sw, metrics: brainMetrics });
+  sw.down = true; await brain.ctx.store.devices.put(deviceRow()).catch(() => {});
+  const s = registry.snapshot();
+  expect(hist(s, "swarm_os_store_write_seconds", { op: "put", kind: "devices", outcome: "journaled" })?.count).toBe(1);
+  expect(gauge(s, "swarm_os_store_degraded")).toBe(1);
+  expect(hist(s, "swarm_os_journal_append_seconds", { outcome: "ok" })?.count).toBeGreaterThan(0);
+  await brain.stop();
+});
+```
+`packages/os/tests/brain-composition.test.ts`, one test added (Task 11's `start`, `provided`, `COS` and `PRECEDENT`):
+```ts
+it("hands the brain's metrics to the chief of staff's wiring and to the terminal sign-in", async () => {
+  const handle = { cos: COS, precedent: PRECEDENT, periodics: [], start: vi.fn(async () => {}), stop: vi.fn() };
+  const createChiefOfStaff = vi.fn(async () => handle); let loginDeps: { metrics?: unknown } | undefined;
+  class CliLogins { constructor(deps: { metrics?: unknown }) { loginDeps = deps; } }
+  const brain = await start({ createChiefOfStaff, mountCliLogin: vi.fn(), CliLogins });
+  expect(createChiefOfStaff.mock.calls[0][0].metrics).toBe(brain.ctx.metrics);
+  expect(loginDeps?.metrics).toBe(brain.ctx.metrics);
+  await brain.stop();
+});
+```
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Run: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run tests/metrics/brain-instrumentation.test.ts tests/auth-passkeys.test.ts tests/brain.test.ts tests/brain-composition.test.ts`
+Expected: FAIL: the strict test registry has the rows, but nothing records them yet (`count` is `undefined` where `1` is expected), and `Periodics` rejects the `metrics` and `now` options at compile time.
+
+- [ ] **Step 3: Implement, recording each row where its table line says**
+
+- `router.ts`: `match` also returns `path`, the registered pattern. `ApiServer` resolves `req.route` once per request, before the guards run (`match` is pure; a path that does not decode is `unmatched`), so even a guard's refusal is labelled. `method` is the request's method when it is an `HttpMethod` or `OPTIONS`, else `other`.
+- `server.ts`: per request, `inFlight += 1` and `set("swarm_os_http_requests_in_flight", inFlight)`; `metrics.span("swarm_os_http_request_seconds", { route, method })`; wrap `res.write` and `res.end` to sum `Buffer.byteLength` of each chunk; on `finish` (or at the chain's end when headers were sent and the response is still open) end the span with `{ status_class }` and its `outcome`, observe the response bytes once, and lower `inFlight` once whichever of `finish` and `close` comes first. The request bytes are `rawBody.length` after the body is read. Every `refusalBody` sent, and every `500 internal`, counts `swarm_os_http_errors_total`.
+- `idempotent()` counts a replay before it answers; it reads `req.route` for the label and the handle from `req`, which `ApiServer` sets as `req.metrics` (internal; not exported).
+- `hub.ts`: `stream` is `"instance"` for an instance actor, else `"events"`. `attach` raises `swarm_os_sse_clients`, starts the stream's span, times `hello()` with `metrics.time("swarm_os_sse_hello_seconds", { stream }, …)`, counts the replayed events and a `gap`; one private `write(stream, text)` counts the bytes, a `false` return and the deliveries by type; `publish` counts the event and times its fan-out with `time("swarm_os_sse_publish_seconds", { type }, …)`; `broadcast` writes through the same `write`; the close path ends the span once with its reason and lowers the gauge (a path that closes a stream on purpose records its reason before `res.end()`, so the `close` event that follows is not counted as `client`); the `seqFile` write runs under `time("swarm_os_sse_seq_write_seconds", {}, …)`.
+- `client.ts`: `openEventStream` reads `opts.metrics ?? processMetrics()` at call time, spans each connection attempt (`ok` at a 200's headers, `auth_refused` for 401 and 403, `http_error` for another status, `network_error` for a rejected `fetch`), and counts each reconnect it schedules by reason.
+- `auth-middleware.ts`: `authenticate` spans `swarm_os_auth_check_seconds` with `{ scheme }` from `credentialsFrom` and `tokenKind`, ends it `ok` or with the code it throws, and counts the refusal with its `reason`. `hooks.ts`, `sessions.ts`, `stepup.ts` and `passkeys.ts` record their rows as the table says (`StepUps.confirm` observes `(now − issuedAt) / 1000` with the reason it returns false for, or `confirmed`). `createAuthServices` passes its `metrics` to each.
+- `periodic.ts`: each task keeps `t0 = now()` when it is started (at `start()`, or at `add` after start) and a tick count `k`; the run at start observes lag 0; tick `k` observes `max(0, now() − (t0 + k × everyMs)) / 1000` when it runs, and counts `swarm_os_brain_periodic_skipped_total` instead when the previous run is in flight; each run is `metrics.time("swarm_os_brain_periodic_seconds", { task: name }, run)`, its error still logged and swallowed as before.
+- `reconcile.ts`: each `status` ask runs in a span ended with `running`, `gone`, `error` or `timeout`; after the rows, `swarm_os_brain_reconcile_rows_total` is counted from the report's four lists.
+- `open-store.ts` and `brain.ts`: `Brain.start` passes `brainMetrics.metrics` (built at step 1, Task 14; the same handle as `ctx.metrics`) to `openOsStore` (which hands it to `ensureOsStack(config, { osHome, log, metrics })` and `new SubstrateOsStore(client, { metrics })`), to `new Journal(paths.journal, { clock, log, metrics })`, `journaledStore(base, journal, snapshot, { clock, log, metrics })`, `createAuthServices`, `new EventHub`, `new ApiServer`, `new Periodics` and `reconcile`. Steps 2 to 12 run inside `metrics.time("swarm_os_brain_start_phase_seconds", { phase }, …)` with the phase names of the table (step 2 is `open_store`, `replay` and `warm_snapshot`; steps 3 and 4 `auth`; step 5 `routes`; step 9 `modules`; step 11 `reconcile`; step 12 `listen`); each module's `start` and `stop` runs under `swarm_os_brain_module_seconds`; `reload` counts `applied` or `refused`. The brain also called `setProcessMetrics` in Task 14, so plan 10's Substrate and lifecycle rows (`swarm_substrate_*`) from the OS stack land in the brain's registry with no extra wiring.
+- `builtin-modules.ts`: `cosModule` adds `metrics: ctx.metrics` to the deps it hands `parts.createChiefOfStaff`, and `cliLoginModule` adds `metrics: ctx.metrics` to `new parts.CliLogins(…)`.
+- The two fixtures pass their `metrics` option through as the Interfaces block says.
+- Append the entries above in the plan 03 slot of `packages/metrics/src/catalogue/os.ts`, after Task 14's. Metric names stay string literals at each call site (plan 10's coverage test reads them).
+
+- [ ] **Step 4: Run the package suites and the build**
+
+Run: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run && cd ../metrics && npx vitest run && cd ../cli && env -u ANTHROPIC_API_KEY npx vitest run && cd ../.. && pnpm turbo build`
+Expected: PASS everywhere, every earlier test of this plan included; every turbo build task successful.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/api packages/os/src/sse packages/os/src/auth packages/os/src/brain packages/metrics/src/catalogue/os.ts packages/os/tests/metrics/brain-instrumentation.test.ts packages/os/tests/auth-passkeys.test.ts packages/os/tests/brain.test.ts packages/os/tests/brain-composition.test.ts packages/os/tests/helpers/api-fixture.ts packages/os/tests/helpers/auth-fixture.ts
+git -c commit.gpgsign=false commit -m "feat(os): measure the brain's requests, streams, credential checks, periodic tasks and start-up"
 ```

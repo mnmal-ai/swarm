@@ -33,6 +33,7 @@
 - Every task ends green: `cd packages/os && npx vitest run` and `pnpm --filter @mnmal-ai/swarm-os build`. No new GitHub workflow, no push to a remote, no `gh workflow run`.
 - Plan 04 may land after this plan. Its `Dispatcher`, `Launcher` and `ResourceSnapshot` reach this plan only as types, through `packages/os/src/commands/peer-types.ts` (Task 7).
 - Plan 03's composition task (its Task 11: `BrainModule`, `BrainContext`, `Periodics` with the `question_expiry` 60 s slot) was not yet written when this plan was. This plan reaches the server, the periodics, the standing runners and the auth hooks only through the `MessagingHost` adapter (Task 14), so a different shape changes that adapter and nothing else. Never edit another plan's files.
+- Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 15 records the rows.
 
 ## Additions to the shared contracts
 
@@ -2284,4 +2285,263 @@ Expected: every test passes, the CLI suite unchanged; the workspace build exits 
 ```bash
 git add packages/os/src/messaging/install.ts packages/os/src/index.ts packages/os/tests/messaging/install.test.ts packages/os/tests/messaging/http.e2e.test.ts
 git commit -m "feat(os): mount messaging and commands on the brain, with tripwire auth hooks"
+```
+
+---
+
+### Task 15: Metrics: messages, questions, push, commands, and the `metrics` chat command
+
+**Files:**
+- Create: `packages/os/src/commands/metrics-command.ts`
+- Modify: `packages/os/src/messaging/redact.ts` (an optional `onMatch` callback), `packages/os/src/messaging/messaging.ts`, `packages/os/src/push/subscriptions.ts`, `packages/os/src/commands/registry.ts` (`COMMAND_KINDS` gains `metrics: "operating"`), `packages/os/src/commands/executor.ts`, `packages/os/src/commands/tripwires.ts` (the stub accepts `metrics` and ignores it, so plan 09's final class receives it from the same construction line), `packages/os/src/messaging/routes.ts`, `packages/os/src/messaging/install.ts`, `packages/os/src/index.ts`, `packages/metrics/src/catalogue/os.ts` (the plan 05 slot)
+- Modify (tests): `packages/os/tests/helpers/world.ts` (`makeWorld({ metrics })`), `packages/os/tests/helpers/commands.ts` (`makeCommandWorld({ metrics })`), `packages/os/tests/commands/registry.test.ts` (36 commands)
+- Test: `packages/os/tests/metrics/messaging-metrics.test.ts`, `packages/os/tests/metrics/command-metrics.test.ts`
+
+**Interfaces:**
+- Consumes: from `@mnmal-ai/swarm-metrics` (plan 10): `Metrics`, `noopMetrics`, `MetricsSnapshot`, `topSinks`, `formatSummary`, `formatTopSinks`, `formatDuration`, `CATALOGUE`; `testRegistry` from `@mnmal-ai/swarm-metrics/testing`. From plan 03: `filterSnapshot` (`packages/os/src/brain/metrics.ts`). From plan 02: the test helpers `hist`, `counter` and `gauge` (`packages/os/tests/metrics/helpers.ts`). Tasks 1 to 14 of this plan.
+- Produces:
+```ts
+// packages/os/src/messaging/redact.ts
+export function redactSecrets(text: string, onMatch?: (pattern: string) => void): string;   // onMatch: once per replacement, with the SECRET_PATTERNS name
+export function redactDeep<T>(value: T, onMatch?: (pattern: string) => void): T;
+// packages/os/src/messaging/messaging.ts
+export interface MessagingDeps { /* … */ metrics?: Metrics }
+// packages/os/src/push/subscriptions.ts
+export function countPushSubscriptions(store: OsStore): Promise<number>;                     // unrevoked devices with a subscription
+export function savePushSubscription(store: OsStore, deviceId: string, input: unknown, metrics?: Metrics): Promise<DeviceRow>;
+export function clearPushSubscription(store: OsStore, deviceId: string, metrics?: Metrics): Promise<DeviceRow>;
+export function deliverPush(deps: { store: OsStore; push: PushSender; log?: Logger; metrics?: Metrics }, humanIds: string[], payload: PushPayload): Promise<{ sent: number; gone: number }>;
+// packages/os/src/commands/registry.ts
+export interface CommandContext { /* … */ metrics?: Metrics }   // the brain's handle; contextFor sets it from deps.metrics, and the executor fills it from its own when absent before spec.run (plan 08's CLI-backed commands read ctx.metrics ?? noopMetrics)
+// packages/os/src/commands/executor.ts
+export interface ExecutorDeps { /* … */ metrics?: Metrics }
+// packages/os/src/commands/tripwires.ts (the stub)
+constructor(deps: { store: OsStore; clock: Clock; messaging?: Messaging; metrics?: Metrics });
+// packages/os/src/messaging/routes.ts
+export interface MessagingRouteDeps { /* … */ metrics?: Metrics }
+// packages/os/src/messaging/install.ts
+export interface MessagingHost { /* … */ metrics?: Metrics; metricsSource?: MetricsSource }   // whoever builds the host passes BrainContext.metrics and BrainContext.brainMetrics
+export function createMessaging(host: Pick<MessagingHost, "store" | "config" | "clock" | "log" | "hub" | "metrics">): Promise<MessagingParts>;
+// packages/os/src/commands/metrics-command.ts
+export interface MetricsSource {                     // plan 03's BrainMetrics satisfies it structurally
+  snapshot(): MetricsSnapshot;
+  uptimeSeconds(): number;
+  instances(): Record<string, { at: number; snapshot: MetricsSnapshot }>;
+  collect?(): Promise<void>;
+  addCollector?(name: string, fn: () => void | Promise<void>): void;
+}
+export const METRICS_SUMMARY = "metrics [area]: time sinks and latencies, from the brain and each live instance";
+export function metricsCommand(source: MetricsSource): CommandSpec<{ area?: string }>;      // kind "query", args z.object({ area: z.string().regex(/^[a-z][a-z0-9_]*$/).optional() })
+export function registerMetricsCommand(source: MetricsSource, into?: CommandSpec<any>[]): void;   // into defaults to COMMANDS; replaces an earlier "metrics" spec in place
+export function metricsReply(input: { brain: MetricsSnapshot; uptimeSeconds: number; instances: Array<{ id: string; label: string; snapshot: MetricsSnapshot }>; prefix?: string }): string;
+```
+
+`metrics [area]` is a query command: it reads and changes nothing, so it needs no step-up, and the executor's audit posts its result text as the `system` reply in the room it was issued in. That reply is the summary.
+- **Prefix.** Without `area`, no filter. With one, the prefix is `swarm_<area>_`; when neither the brain's snapshot nor any instance's has a series under it and `area` does not start with `os_`, `swarm_os_<area>_` is tried, so `/metrics http` finds `swarm_os_http_*`. Nothing under either: `{ ok: true, text: "No metrics under swarm_<area>_." }`.
+- **Instances.** The entries of `source.instances()` whose `Instance` row is in `LIVE_INSTANCE_STATES`, sorted by id; each labelled `<board name>:<card>` (the board's id when the row is missing).
+- **Reply** (`metricsReply`), lines joined by `\n`: `Brain · up <formatDuration(uptimeSeconds)>`, plus ` · <prefix>*` with a prefix; then `formatSummary(prefix ? filterSnapshot(brain, [prefix]) : brain, { wallSeconds: uptimeSeconds, top: 10 })`; then, for each instance, a blank line, `Instance <id> · <label>` and `formatTopSinks(topSinks(filtered, 3, prefix ? { names: (n) => n.startsWith(prefix) } : undefined))` (`filtered` being the instance's snapshot through the same filter), or `no time sinks yet` when that is empty; with no instance, a blank line and `No live instance has reported metrics yet.` (`topSinks` leaves plan 10's `CONTAINER_METRICS` out unless `names` is given, so `/metrics run` still shows the run's phases.)
+- **Data.** `{ prefix: <the prefix used> | null, instances: <the ids shown> }`. The command calls `source.collect?.()` first.
+
+Catalogue rows this task adds (`room_kind` is the room's kind, or `missing` when the room does not exist; `from_kind` the sender's `fromKind`; `kind` the message kind; `command` the registered name, or `unknown` for a name not in the registry; `actor` the actor's kind; `code` a `RefusalCode`):
+
+| Name | Kind | Unit | Labels | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_messaging_posts_total` | counter | count | `room_kind`, `from_kind`, `kind` | `Messaging`'s store-and-publish step (so `post`, `ask` and `answer` all count), once the row is stored |
+| `swarm_os_messaging_post_seconds` | histogram | seconds | `room_kind`, `outcome` | the same step: redaction, `nextSeq`, `put` and publish (push is timed on its own) |
+| `swarm_os_messaging_body_bytes` | histogram | bytes | `room_kind`, `kind` | the same step, the stored (redacted) body |
+| `swarm_os_messaging_redact_seconds` | histogram | seconds | `outcome` | the same step, `redactSecrets` on the body and `redactDeep` on the data |
+| `swarm_os_messaging_redactions_total` | counter | count | `pattern` (a `SECRET_PATTERNS` name) | the same step, through `onMatch` |
+| `swarm_os_messaging_questions_open` | gauge | count | | `ask` (+1), an on-time `answer` (−1), and `expireQuestions`, which sets it to the open rows it read minus those it closed |
+| `swarm_os_messaging_question_open_seconds` | histogram | seconds | `outcome` (`answered`, `proceeded`, `expired`) | `answer` and `expireQuestions`: `now − askedAt` by the brain's clock, when a question leaves `open` |
+| `swarm_os_messaging_question_changes_total` | counter | count | `change` (`asked`, `answered`, `late_answer`, `proceeded`, `expired`, `extended`) | wherever `onQuestion` listeners are told; late answers are `change: "late_answer"` |
+| `swarm_os_messaging_long_poll_seconds` | histogram | seconds | `outcome` (`immediate`, `changed`, `timeout`) | `GET /api/questions/:id` |
+| `swarm_os_push_send_seconds` | histogram | seconds | `outcome` (`sent`, `gone`, `failed`) | `deliverPush`, each device send |
+| `swarm_os_push_failures_total` | counter | count | `status` (the push service's HTTP status, `400` to `599`, or `none`) | `deliverPush`, each failed send |
+| `swarm_os_push_subscriptions` | gauge | count | | `savePushSubscription`, `clearPushSubscription`, a `gone` in `deliverPush`, and `mountMessaging` once, each from `countPushSubscriptions` |
+| `swarm_os_command_seconds` | histogram | seconds | `command`, `kind` (`query`, `operating`, `standing`, or `none`), `actor`, `outcome` (`ok`, `refused`, `failed`, `error`) | `CommandExecutor.execute` and `executeConfirmed`, from the call to the end of the audit; `failed` is `ok: false` without a code, `error` a `run` that threw |
+| `swarm_os_command_refusals_total` | counter | count | `command`, `code` | the executor, each refusal |
+| `swarm_os_command_stage_seconds` | histogram | seconds | `command`, `stage` (`cooling`, `limits`, `stepup`, `run`, `audit`), `outcome` | the executor's stages: `tripwires.cooling`, `limits.checkCommand`, the step-up (issue, or confirm and consume), `spec.run`, the two audit posts |
+
+```ts
+  // plan 05
+  { name: "swarm_os_messaging_posts_total", kind: "counter", unit: "count", help: "Messages stored, by room kind, sender kind and message kind", labels: ["room_kind", "from_kind", "kind"] },
+  { name: "swarm_os_messaging_post_seconds", kind: "histogram", unit: "seconds", help: "Time to redact, store and publish one message", labels: ["room_kind", "outcome"] },
+  { name: "swarm_os_messaging_body_bytes", kind: "histogram", unit: "bytes", help: "Stored message body size", labels: ["room_kind", "kind"] },
+  { name: "swarm_os_messaging_redact_seconds", kind: "histogram", unit: "seconds", help: "Time to redact secrets from one message", labels: ["outcome"] },
+  { name: "swarm_os_messaging_redactions_total", kind: "counter", unit: "count", help: "Secrets redacted from messages, by pattern", labels: ["pattern"] },
+  { name: "swarm_os_messaging_questions_open", kind: "gauge", unit: "count", help: "Questions waiting for an answer", labels: [] },
+  { name: "swarm_os_messaging_question_open_seconds", kind: "histogram", unit: "seconds", help: "How long a question stayed open, by how it closed", labels: ["outcome"] },
+  { name: "swarm_os_messaging_question_changes_total", kind: "counter", unit: "count", help: "Question changes: asked, answered, late answers, proceeded, expired, extended", labels: ["change"] },
+  { name: "swarm_os_messaging_long_poll_seconds", kind: "histogram", unit: "seconds", help: "Room-token question long polls, by how they ended", labels: ["outcome"] },
+  { name: "swarm_os_push_send_seconds", kind: "histogram", unit: "seconds", help: "Web Push send time, by outcome", labels: ["outcome"] },
+  { name: "swarm_os_push_failures_total", kind: "counter", unit: "count", help: "Web Push sends that failed, by the push service's status", labels: ["status"] },
+  { name: "swarm_os_push_subscriptions", kind: "gauge", unit: "count", help: "Devices with a live push subscription", labels: [] },
+  { name: "swarm_os_command_seconds", kind: "histogram", unit: "seconds", help: "Command time from request to audit, by command, kind, actor and outcome", labels: ["command", "kind", "actor", "outcome"] },
+  { name: "swarm_os_command_refusals_total", kind: "counter", unit: "count", help: "Commands refused, by code", labels: ["command", "code"] },
+  { name: "swarm_os_command_stage_seconds", kind: "histogram", unit: "seconds", help: "Time in each stage of the command executor", labels: ["command", "stage", "outcome"] },
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+`packages/os/tests/commands/registry.test.ts`: the first test becomes "declares the overview's 35 commands, plan 05's metrics, and their kinds", with `toHaveLength(36)` and `metrics: "query"` added to its `toMatchObject`.
+
+`packages/os/tests/metrics/messaging-metrics.test.ts` (per test: `({ metrics: registry } = testRegistry(CATALOGUE))`, `w = await makeWorld({ metrics: registry })`, `s = () => registry.snapshot()`; `post(o)` and `ask()` as in Tasks 4 and 5; the world posts nothing while it is built):
+```ts
+it("counts posts by room kind, sender kind and message kind, sizes their bodies and times them", async () => {
+  await post(); await post({ body: "twelve bytes" });
+  expect(counter(s(), "swarm_os_messaging_posts_total", { room_kind: "instance", from_kind: "worker", kind: "text" })).toBe(2);
+  expect(hist(s(), "swarm_os_messaging_body_bytes", { room_kind: "instance", kind: "text" })).toMatchObject({ count: 2, sum: 20 });
+  expect(hist(s(), "swarm_os_messaging_post_seconds", { room_kind: "instance", outcome: "ok" })?.count).toBe(2);
+  await expect(post({ roomId: "room-missing" })).rejects.toMatchObject({ code: "room_not_found" });
+  expect(hist(s(), "swarm_os_messaging_post_seconds", { room_kind: "missing", outcome: "error" })?.count).toBe(1);
+});
+it("counts redactions by pattern, times them, and puts no secret in a label", async () => {
+  const ghp = "ghp_" + "a".repeat(36);
+  await post({ body: `use ${ghp}`, data: { env: "GITHUB_TOKEN=abc123" } });
+  expect(["github", "env-assignment"].map((pattern) => counter(s(), "swarm_os_messaging_redactions_total", { pattern }))).toEqual([1, 1]);
+  expect(hist(s(), "swarm_os_messaging_redact_seconds", { outcome: "ok" })?.count).toBe(1);
+  expect(JSON.stringify(s())).not.toContain(ghp);
+});
+it("tracks open questions, how long each stayed open by outcome, and every question change", async () => {
+  const q1 = await ask();
+  expect(gauge(s(), "swarm_os_messaging_questions_open")).toBe(1);
+  w.clock.advance(5 * 60_000);
+  await w.messaging.answer(q1.id, w.refs.owner, "Postgres");
+  expect(gauge(s(), "swarm_os_messaging_questions_open")).toBe(0);
+  await ask();
+  w.clock.advance(31 * 60_000);
+  await w.messaging.expireQuestions(w.clock.now(), { lookup: async () => "Use Postgres" });
+  await w.messaging.answer(q1.id, w.refs.owner, "Redis after all");
+  expect(["answered", "proceeded"].map((outcome) => hist(s(), "swarm_os_messaging_question_open_seconds", { outcome })).map((x) => [x?.count, x?.sum])).toEqual([[1, 300], [1, 1860]]);
+  expect(["asked", "answered", "proceeded", "late_answer"].map((change) => counter(s(), "swarm_os_messaging_question_changes_total", { change }))).toEqual([2, 1, 1, 1]);
+  expect(gauge(s(), "swarm_os_messaging_questions_open")).toBe(0);
+});
+it("times each push by outcome, counts failures by status, and keeps the subscription gauge", async () => {
+  w.push.goneEndpoints.add(SUB("dev-laptop").endpoint);
+  await post({ kind: "question", body: "Which database?" });
+  expect(["sent", "gone"].map((outcome) => hist(s(), "swarm_os_push_send_seconds", { outcome })?.count)).toEqual([1, 1]);
+  expect(gauge(s(), "swarm_os_push_subscriptions")).toBe(2);              // dev-phone and dev-other; dev-laptop's went
+  w.push.failWith = new PushError("send_failed", "push service down", 503);
+  await post({ kind: "question", body: "Which cache?" });
+  w.push.failWith = new Error("socket hang up");
+  await post({ kind: "question", body: "Which queue?" });
+  expect(["503", "none"].map((status) => counter(s(), "swarm_os_push_failures_total", { status }))).toEqual([1, 1]);
+  await savePushSubscription(w.store, "dev-laptop", SUB("dev-laptop-2"), registry);
+  expect(gauge(s(), "swarm_os_push_subscriptions")).toBe(3);
+  await clearPushSubscription(w.store, "dev-phone", registry);
+  expect(gauge(s(), "swarm_os_push_subscriptions")).toBe(2);
+});
+it("times room-token long polls by how they ended", async () => {
+  const cw = await makeCommandWorld({ metrics: registry });
+  const call = routeCaller(messagingRoutes({ ...routeDeps(cw, { longPollMs: 30 }), metrics: registry }));
+  const q = ((await call("POST", "/api/rooms/:id/ask", cw.actors.workerA, { params: { id: cw.roomOf("inst-a") }, body: { body: "Which?" } })) as AskResponse).questionId;
+  await call("GET", "/api/questions/:id", cw.actors.workerA, { params: { id: q } });
+  const waiting = call("GET", "/api/questions/:id", cw.actors.workerA, { params: { id: q } });
+  await cw.messaging.answer(q, cw.refs.owner, "This one"); await waiting;
+  await call("GET", "/api/questions/:id", cw.actors.workerA, { params: { id: q } });
+  expect(["timeout", "changed", "immediate"].map((outcome) => hist(s(), "swarm_os_messaging_long_poll_seconds", { outcome })?.count)).toEqual([1, 1, 1]);
+});
+```
+`packages/os/tests/metrics/command-metrics.test.ts` (per test: `registry` and `s()` as above, `w = await makeCommandWorld({ metrics: registry })`, `run(actor, argv, roomId?)` as in Task 8; `h(name, sum, labels?)` builds a one-observation seconds `HistogramSnapshot` and `snap(histograms)` a snapshot with nothing else; `BRAIN = snap([h("swarm_os_http_request_seconds", 4, { route: "/api/rooms", method: "GET", status_class: "2xx", outcome: "ok" }), h("swarm_os_command_seconds", 2, { command: "top", kind: "query", actor: "human", outcome: "ok" })])`; `INST_A = snap([h("swarm_git_command_seconds", 5), h("swarm_substrate_request_seconds", 3), h("swarm_agent_api_seconds", 9), h("swarm_merge_gate_seconds", 1), h("swarm_run_phase_seconds", 40, { phase: "execution", outcome: "ok" })])`; `INST_B = snap([h("swarm_git_command_seconds", 7)])`; `source(o)` is `{ snapshot: () => BRAIN, uptimeSeconds: () => 3_600, instances: () => ({ "inst-a": { at: 1, snapshot: INST_A }, "inst-b": { at: 1, snapshot: INST_B } }), ...o }`):
+```ts
+it("counts every command by name, kind, actor and outcome, and every refusal by code", async () => {
+  await run(w.actors.phone, ["help"]); await run(w.actors.phone, ["frobnicate"]); await run(w.actors.phone, ["say"]);
+  await run(w.actors.phone, ["instances"]); await run(w.actors.workerA, ["help"], w.roomOf("inst-a"));
+  const n = (labels: Record<string, string>) => hist(s(), "swarm_os_command_seconds", labels)?.count;
+  expect([n({ command: "help", kind: "query", actor: "human", outcome: "ok" }), n({ command: "unknown", kind: "none", actor: "human", outcome: "refused" }),
+    n({ command: "say", kind: "operating", actor: "human", outcome: "refused" }), n({ command: "instances", kind: "query", actor: "human", outcome: "error" }),
+    n({ command: "help", kind: "query", actor: "room", outcome: "refused" })]).toEqual([1, 1, 1, 1, 1]);
+  expect(["not_found", "bad_request", "forbidden"].map((code) => counter(s(), "swarm_os_command_refusals_total", { code }))).toEqual([1, 1, 1]);
+  expect(JSON.stringify(s())).not.toContain("frobnicate");
+});
+it("times the stages of a standing command up to its step-up, and its audit", async () => {
+  await run(w.actors.phone, ["register", "board-b", "/path/to/project-b"]);
+  const stage = (name: string) => hist(s(), "swarm_os_command_stage_seconds", { command: "register", stage: name, outcome: "ok" })?.count;
+  expect(["cooling", "limits", "stepup", "run", "audit"].map(stage)).toEqual([1, 1, 1, undefined, 1]);
+  expect(JSON.stringify(s())).not.toContain("/path/to/project-b");
+});
+it("is a query command that needs no step-up", async () => {
+  expect(COMMAND_KINDS.metrics).toBe("query");
+  registerMetricsCommand(source(), w.commands);
+  expect(await run(w.actors.phone, ["metrics"])).toMatchObject({ ok: true });
+  expect([w.hub.published.filter((e) => e.type === "stepup"), w.stepUps.issued]).toEqual([[], []]);
+});
+it("posts the brain's summary and each live instance's three largest sinks into the room it was issued in", async () => {
+  registerMetricsCommand(source(), w.commands);
+  await w.store.instances.patch("inst-b", { state: "exited" });
+  const r = await run(w.actors.phone, ["metrics"], w.roomOf("inst-a"));
+  const text = metricsReply({ brain: BRAIN, uptimeSeconds: 3_600, instances: [{ id: "inst-a", label: "board-a:42", snapshot: INST_A }] });
+  expect(r).toEqual({ ok: true, text, data: { prefix: null, instances: ["inst-a"] } });
+  expect(text.startsWith(`Brain · up ${formatDuration(3_600)}\n${formatSummary(BRAIN, { wallSeconds: 3_600, top: 10 })}`)).toBe(true);
+  expect(text).toContain(`Instance inst-a · board-a:42\n${formatTopSinks(topSinks(INST_A, 3))}`);
+  expect(text).not.toContain("inst-b");
+  expect((await w.messagesIn(w.roomOf("inst-a"))).at(-1)).toMatchObject({ kind: "system", body: text });
+});
+it("keeps one area on the brain and on each instance, tries os_<area> for a bare word, and says when nothing matches", async () => {
+  registerMetricsCommand(source(), w.commands);
+  const http = await run(w.actors.phone, ["metrics", "os_http"]);
+  expect(await run(w.actors.phone, ["metrics", "http"])).toEqual(http);
+  expect([http.text.includes("swarm_os_http_request_seconds"), http.text.includes("swarm_os_command_seconds")]).toEqual([true, false]);
+  expect((await run(w.actors.phone, ["metrics", "run"])).text).toContain("swarm_run_phase_seconds");
+  expect(await run(w.actors.phone, ["metrics", "nothing"])).toEqual({ ok: true, text: "No metrics under swarm_nothing_." });
+  expect(refusalCode(await run(w.actors.phone, ["metrics", "../etc"]))).toBe("bad_request");
+});
+it("gives each command's run the brain's handle as ctx.metrics", async () => {
+  let seen: unknown;
+  registerCommand({ name: "doctor", kind: "operating", summary: "doctor: check the brain", args: z.object({}), run: async (ctx) => { seen = ctx.metrics; return { ok: true, text: "ok" }; } }, w.commands);
+  await run(w.actors.phone, ["doctor"]);
+  expect(seen).toBe(registry);
+});
+it("replaces an earlier metrics spec in the list, so a brain started again in one process reads its own source", async () => {
+  registerMetricsCommand(source({ uptimeSeconds: () => 1 }), w.commands);
+  registerMetricsCommand(source({ uptimeSeconds: () => 7_200 }), w.commands);
+  expect(w.commands.filter((c) => c.name === "metrics")).toHaveLength(1);
+  expect((await run(w.actors.phone, ["metrics"])).text).toContain(formatSummary(BRAIN, { wallSeconds: 7_200, top: 10 }));
+});
+it("mountMessaging hands its metrics to Messaging, registers metrics when given a source, and sets the subscription gauge", async () => {
+  const world = await makeWorld();
+  const host = { store: world.store, config: world.config, clock: world.clock, log: world.log, hub: world.hub, server: { route: () => {} } as never,
+    periodic: () => {}, standingRunners: { fallback: () => {} } as never, authHooks: { onNewAddress: async () => {}, onStepUpFailed: async () => {} },
+    stepUps: testStepUps(world.store, world.clock), lockdown: { active: () => false }, metrics: registry, metricsSource: source() };
+  const parts = await createMessaging(host);
+  mountMessaging(host, parts, { runtime: () => ({}) as never, precedent: () => ({ lookup: async () => null }) });
+  await vi.waitFor(() => expect(gauge(s(), "swarm_os_push_subscriptions")).toBe(3));
+  await parts.messaging.post({ roomId: world.roomOf("inst-b"), from: world.refs.workerB, kind: "text", body: "hi", provenance: { source: "worker" } });
+  expect([counter(s(), "swarm_os_messaging_posts_total", { room_kind: "instance" }), COMMANDS.some((c) => c.name === "metrics")]).toEqual([1, true]);
+});
+```
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Run: `cd packages/os && npx vitest run tests/metrics/messaging-metrics.test.ts tests/metrics/command-metrics.test.ts tests/commands/registry.test.ts`
+Expected: FAIL, `Failed to resolve import "../../src/commands/metrics-command.js"`, `COMMAND_KINDS` has 35 names, and the other assertions find no series.
+
+- [ ] **Step 3: Implement, recording each row where its table line says**
+
+- `redact.ts`: before each pattern's `replace`, count its matches with `text.match(pattern)?.length` and call `onMatch(name)` that many times, so the `$1` replacements stay as they are. `redactDeep` passes `onMatch` down. Both default to no callback, so the logger and plan 02's callers are unchanged.
+- `messaging.ts`: `deps.metrics ?? noopMetrics`. The private store-and-publish step (Task 5's split of `post`) runs under a span of `swarm_os_messaging_post_seconds` labelled with the room's kind (`missing` when the room is not found, ended `error`), times the redaction with `time("swarm_os_messaging_redact_seconds", {}, …)`, and after the `put` counts the post and observes `Buffer.byteLength(row.body)`. `ask`, `answer` and `expireQuestions` move the questions gauge and observe the open seconds as the table says, and the one place that calls the `onQuestion` listeners also counts `swarm_os_messaging_question_changes_total{change}`. Push goes through `deliverPush` with the same `metrics`.
+- `subscriptions.ts`: `deliverPush` spans each send and ends it `sent`, `gone` or `failed`; a failure counts `swarm_os_push_failures_total` with `String(err.statusCode)` when the error is a `PushError` carrying a status from 400 to 599, else `none`. After a `gone`, and in `savePushSubscription` and `clearPushSubscription`, set the gauge from `countPushSubscriptions(store)`.
+- `registry.ts`: `COMMAND_KINDS` gains `metrics: "operating"` (36 names). `registerBuiltinCommands` does not register it: it needs a source, so `mountMessaging` does. `CommandContext` gains the optional `metrics`; it is optional so that every context other plans build stays valid.
+- `executor.ts`: the pipeline's labels come from step 1 (`command` is the spec's name, or `unknown` when there is none; `kind` the spec's, or `none`); a span of `swarm_os_command_seconds` covers steps 1 to 9 and ends with the outcome; a refusal counts `swarm_os_command_refusals_total`; the cool-down read, the limit gate, the step-up, `spec.run` and the audit each run under `time("swarm_os_command_stage_seconds", { command, stage }, …)` (a stage that throws still records `error` and rethrows as before). No argv word, room id or step-up id becomes a label. `spec.run` receives `{ ...ctx, metrics: ctx.metrics ?? metrics }`.
+- `routes.ts`: `contextFor` sets `metrics: deps.metrics ?? noopMetrics`. `GET /api/questions/:id` spans `swarm_os_messaging_long_poll_seconds`: `immediate` when the question is not `open` at the first read, `changed` when the listener fires, `timeout` when `longPollMs` passes. The push routes pass `deps.metrics` to `savePushSubscription` and `clearPushSubscription`.
+- `metrics-command.ts` to the Interfaces and rules above; `run` reads the board name with `store.boards.get(row.boardId)`.
+- `install.ts`: `createMessaging` gives `host.metrics` to `Messaging`; `mountMessaging` gives it to `Tripwires`, `CommandExecutor` and `messagingRoutes`, calls `registerMetricsCommand(host.metricsSource)` when the host has one, and sets `swarm_os_push_subscriptions` once from `countPushSubscriptions` (not awaited; a failure is logged). Wherever the brain builds the `MessagingHost` from its `BrainContext` (the `messagingBrainModule` the overview's rulings ask this plan to export), it passes `metrics: ctx.metrics` and `metricsSource: ctx.brainMetrics`, so the running brain has the `metrics` command.
+- The test helpers: `makeWorld({ metrics })` hands it to `Messaging`; `makeCommandWorld({ metrics })` hands it to `makeWorld` and to the executor.
+- Append the entries above in the plan 05 slot of `packages/metrics/src/catalogue/os.ts`, and add `countPushSubscriptions`, `metricsCommand`, `registerMetricsCommand`, `metricsReply`, `METRICS_SUMMARY` and the `MetricsSource` type to the plan 05 block of `src/index.ts`.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd packages/os && npx vitest run tests/metrics/messaging-metrics.test.ts tests/metrics/command-metrics.test.ts tests/commands/registry.test.ts`
+Expected: PASS, 5, 8 and the registry file's tests.
+
+- [ ] **Step 5: Run the package suites and the build**
+
+Run: `cd packages/os && npx vitest run && cd ../metrics && npx vitest run && cd ../.. && pnpm --filter @mnmal-ai/swarm-os build`
+Expected: every test passes, Tasks 1 to 14's included and plan 10's `catalogue.test.ts`; the build exits 0.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/os/src/messaging packages/os/src/push packages/os/src/commands packages/os/src/index.ts packages/metrics/src/catalogue/os.ts packages/os/tests/helpers/world.ts packages/os/tests/helpers/commands.ts packages/os/tests/metrics/messaging-metrics.test.ts packages/os/tests/metrics/command-metrics.test.ts packages/os/tests/commands/registry.test.ts
+git -c commit.gpgsign=false commit -m "feat(os): measure messages, questions, push and commands, and the metrics chat command"
 ```
