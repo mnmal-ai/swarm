@@ -20,6 +20,7 @@
 - **Bounded labels.** Label values come from bounded sets: phase names, roles, tool names, operation names, route patterns, outcome words. Never a path, title, prompt, argument, error message or id, except `run_id` as a base label on a run's registry and ids on span records.
 - **Names** follow `swarm_<area>_<thing>_<unit>`: counters end `_total`, duration histograms end `_seconds`, sizes `_bytes`, token histograms and counters `_tokens` / `_tokens_total`.
 - **Run-side choke points read `processMetrics()`** at call time (the run's registry, set by `createRunMetrics`), so no constructor in the existing packages has to be threaded; a class that already takes options may also accept `metrics?: Metrics`, which wins.
+- **Long-lived callers name their parent.** The span context is inherited by anything started inside a span, so spans recorded by timers, pollers, servers and event handlers pass their parent explicitly: the run's `root` on the run side, `null` in the brain. Only work done inside the call that opened a span inherits it.
 - **Every metric is declared** in `packages/metrics/src/catalogue/` before it is recorded; tests run registries with `strict: true`, which throws on an undeclared name or label.
 - **`swarm run` behaves as before** apart from the added end-of-run block, the metrics file and the dashboard panel. The CLI suite (`cd packages/cli && npx vitest run`) stays green after every task.
 - **Package conventions:** `packages/metrics` is `"type": "module"`, `"version": "1.0.0-alpha.0"`, `"license": "Apache-2.0"`, has no `dependencies`, extends `../../tsconfig.base.json`, tests with `vitest run`, builds with `tsc`.
@@ -421,12 +422,13 @@ export interface ProcessProbes { memoryUsage(): NodeJS.MemoryUsage; cpuUsage(): 
 | `swarm_process_load_average` | gauge | ratio | |
 | `swarm_process_system_free_bytes` | gauge | bytes | |
 | `swarm_process_disk_free_bytes` | gauge | bytes | `disk` (the index of the path in `diskPaths`, as a string: `"0"`, `"1"`) |
+| `swarm_process_probe_errors_total` | counter | count | `probe` (`event_loop`, `memory`, `cpu`, `gc`, `load`, `freemem`, `disk`) |
 
 Every row also accepts the base label `process` (`run`, `brain`, `room-mcp`), which callers set with `metrics.with({ process: "…" })`, and `run_id`.
 
 - [ ] **Step 1: Write the failing test** with scripted `probes`: after `startProcessSampler(metrics, { probes, diskPaths: ["/tmp"] })` the snapshot holds every gauge above with the scripted values (event-loop nanoseconds converted to seconds; disk free = `bavail × bsize`); a second sample after `vi.advanceTimersByTime(5000)` increases `swarm_process_cpu_seconds_total{mode:"user"}` by the scripted delta in seconds (CPU usage is microseconds); `stop()` stops further samples; with real probes (no `probes` option) one sample runs without throwing and records a positive `swarm_process_rss_bytes`.
 - [ ] **Step 2: Run it to see it fail.** Run: `cd packages/metrics && npx vitest run tests/process.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement** with `perf_hooks.monitorEventLoopDelay({ resolution: 20 })` (reset after each sample), `PerformanceObserver` on `entryTypes: ["gc"]` mapping `detail.kind` to the four words, `process.memoryUsage()`, `process.cpuUsage()` deltas, `os.loadavg()[0]`, `os.freemem()`, `fs.statfsSync`, each probe call wrapped so one failing probe skips only its rows.
+- [ ] **Step 3: Implement** with `perf_hooks.monitorEventLoopDelay({ resolution: 20 })` (reset after each sample; under Node the readings include the timer's resolution, so subtract it and floor at 0, while Bun already reports the true delay — detect with `process.versions.bun`, so both runtimes report the same quantity), `PerformanceObserver` on `entryTypes: ["gc"]` mapping `detail.kind` to the four words, `process.memoryUsage()`, `process.cpuUsage()` deltas, `os.loadavg()[0]`, `os.freemem()`, `fs.statfsSync`, each probe call wrapped so one failing probe skips only its rows and counts `swarm_process_probe_errors_total{probe}`.
 - [ ] **Step 4: Run it to see it pass.** Run: `cd packages/metrics && npx vitest run`. Expected: PASS.
 - [ ] **Step 5: Commit**
 
@@ -727,7 +729,7 @@ The end-of-run block, printed after the existing session summary unless `--quiet
 
 - [ ] **Step 1: Write the failing tests** on fixture files written with `JsonlMetricsSink` into a temporary swarm directory: `--last` picks the newest run; `--run` prints `Run <id>`, a `Time` line, phase lines and `Top time sinks`; `--waterfall` prints the indented tree; `--since 1h` adds two runs' counters; `--json` parses and holds `top`; `--catalogue` lists `swarm_run_phase_seconds`; an absent directory prints the message and returns 0; output never contains `$`.
 - [ ] **Step 2: Run them to see them fail.**
-- [ ] **Step 3: Implement**, and print the block from `run.ts`.
+- [ ] **Step 3: Implement**, and print the block from `run.ts`. Always call `aggregate(records, { since, defs: CATALOGUE })`: `since` so each boot's counters are differenced at the window's start, and `defs` so observed seconds metrics (such as `swarm_agent_api_seconds`) aggregate as seconds and appear among the time sinks. Read the files with no `since` filter (`readMetricsDir` without `since`) so `aggregate` sees each boot's snapshot from before the window; build `--waterfall` from the run's unfiltered files too.
 - [ ] **Step 4: Run the CLI suite and the build.** Expected: PASS.
 - [ ] **Step 5: Commit**
 

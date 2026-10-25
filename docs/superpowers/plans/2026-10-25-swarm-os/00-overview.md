@@ -17,7 +17,7 @@
 | 01 | `01-run-attach.md` | cli, task-backends, worker-backends, orchestrator | `swarm run --card`, per-card checkpoints, `--os`/`--os-token` attachment, `swarm room-mcp`, question gate that suspends the three session timers | 03 (`openEventStream` only; ships behind flags) |
 | 02 | `02-os-store.md` | substrate-plugin, os | `swarm-os` namespace types, `OsStore` + `SubstrateOsStore` + `MemoryOsStore`, write-ahead `Journal`, OS stack lifecycle (`ensureOsStack`) | nothing |
 | 03 | `03-brain-core.md` | os, cli | `os.json` config, `Brain` (daemon lifecycle, reconcile on start, health), HTTP `Api` with the SSE `EventHub` and the shared SSE client, auth (passkeys, cookie sessions, devices, instance tokens, step-up codes), `swarm os init\|start\|stop\|status\|install\|lockdown\|confirm` | 02 |
-| 04 | `04-ingress-dispatch.md` | os | `BoardClient` (Trello API, GitHub API, fake), `Poller`, webhooks, `Dispatcher` (policy chain, draining, holds, asks), `Launcher` (local, fake), `Resources`, instance lifecycle (heartbeats, dead, paused, retry, login_expired) | 02, 03 |
+| 04 | `04-ingress-dispatch.md` | os, cli (`os-host.ts`) | `BoardClient` (Trello API, GitHub API, fake), `Poller`, webhooks, `Dispatcher` (policy chain, draining, holds, asks), `Launcher` (local, fake), `Resources`, instance lifecycle (heartbeats, dead, paused, retry, login_expired) | 02, 03 |
 | 05 | `05-messaging.md` | os | rooms, participants, messages, delivery (SSE fan-out, Web Push), `CommandRegistry` + parser + executor (authority, step-up, audit, tripwires), room tokens for sessions | 02, 03 |
 | 06 | `06-chief-of-staff.md` | os | the chief-of-staff agent (Agent SDK session with the command set as tools), memory, standing orders, readiness check, act / `ask_first`, system prompts from files, provenance envelope, injection corpus tests | 04, 05 |
 | 07 | `07-dashboard-web.md` | os-web, os | the PWA: passkey login, device enrolment, chat with the chief of staff, channels, instances and resources, command bar, push subscription, service worker; embedding into the binary | 03, 05 |
@@ -145,7 +145,7 @@ export function journaledStore(store: OsStore, journal: Journal, snapshot: Memor
 
 ### Brain config `os.json` (plan 03)
 
-`~/.swarm/os.json` (`SWARM_OS_HOME` overrides `~/.swarm/os`), mode `0600`, validated with zod in `packages/os/src/config/schema.ts`:
+`<os_home>/os.json`, where `os_home` is `~/.swarm/os` unless `SWARM_OS_HOME` overrides it, mode `0600`, validated with zod in `packages/os/src/config/schema.ts`:
 
 ```ts
 export const OsConfigSchema = z.object({
@@ -153,7 +153,7 @@ export const OsConfigSchema = z.object({
   bind: z.object({ host: z.string().default("127.0.0.1"), port: z.number().int().default(3200) }),
   public_url: z.string().url(),                        // https origin for passkeys, push, webhooks
   host_trust: z.enum(["owner", "shared"]).default("owner"),
-  launcher: z.discriminatedUnion("kind", [ z.object({ kind: z.literal("local") }), z.object({ kind: z.literal("remote"), hosts: z.array(z.object({ name: z.string(), ssh: z.string() })) }) ]),
+  launcher: z.object({ local: z.boolean().default(true), hosts: z.array(z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).refine((n) => n !== "local"), ssh: z.string().min(1), swarm: z.string().default("swarm"), platform: z.enum(["darwin", "linux"]).optional() })).default([]) }).default({ local: true, hosts: [] }),   // ruling 2026-10-25: a registration's host is "local" or a hosts[].name; limits.launcher_hosts must list it
   os_stack: z.object({ port: z.number().int().default(49338), postgres_url: z.string(), compose_project: z.string().default("swarm-os") }),
   push: z.object({ vapid_public: z.string(), vapid_private: z.string(), subject: z.string() }).optional(),
   owners: z.array(z.object({ id: z.string(), name: z.string() })).min(1),
@@ -249,7 +249,7 @@ export interface LauncherHandle { instanceId: string; host: string; handle: stri
 export interface Launcher {
   kind: "local" | "remote" | "fake";
   start(spec: InstanceSpec): Promise<LauncherHandle>;
-  status(handle: LauncherHandle): Promise<"running" | "gone">;
+  status(handle: LauncherHandle): Promise<"running" | "gone" | "unreachable">;   // "unreachable": the host did not answer; keep the instance and recheck
   stop(handle: LauncherHandle, mode: "graceful" | "immediate"): Promise<void>;
   resources(): Promise<ResourceSnapshot>;
 }
@@ -405,7 +405,7 @@ The exact surface is the **Interfaces** block of plan 10, Task 1 (and Tasks 2 to
 | `swarm os metrics [--top <n>] [--json] [--prometheus]` | the brain's snapshot from the terminal | 08 |
 | Chat command `metrics [area]` | a query command (read-only, no step-up) that posts a formatted summary into the room | 05 |
 
-**Rule for every task.** Code a task adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes a `Metrics` handle (constructor option `metrics?: Metrics`, default `noopMetrics`, or `BrainContext.metrics` in the brain; on the run side, existing choke points read `processMetrics()` instead) and records the catalogue rows its plan's metrics task names. Each plan's metrics task adds the rows, wires the handle, and pins them with tests on a `MetricsRegistry` with `strict: true` and a fake clock.
+**Rule for every task.** Code a task adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes a `Metrics` handle (constructor option `metrics?: Metrics`, default `noopMetrics`, or `BrainContext.metrics` in the brain; on the run side, existing choke points read `processMetrics()` instead) and records the catalogue rows its plan's metrics task names. Each plan's metrics task adds the rows, wires the handle, and pins them with tests on a `MetricsRegistry` with `strict: true` and a fake clock. Spans recorded by timers, pollers, servers and event handlers pass their parent explicitly (`null` in the brain, the run's root span in a run), because the span context is inherited by anything started inside a span.
 
 **Why files, not Substrate entities.** The repository's rule "telemetry entities, not JSONL" covers telemetry events (`SessionEvent`, `TranscriptEntry`, `OversightChain`), and they stay entities. Metrics are a different thing: the Substrate store is one of the systems being measured, so its own latency and outages must be recorded somewhere that does not depend on it, and a metric write must never add load or a failure mode to the path it measures. Hence local JSON lines, owned by the process that records them. The repository's other rule holds too: swarm computes, stores and shows no currency, so no metric is in dollars; model usage is measured in tokens.
 
@@ -488,3 +488,14 @@ The plans were written in parallel against the contracts above; their reports ad
 - `metrics [area]` is a query command (no step-up), added to plan 09's `QUERY` list.
 - Plan 09's metrics task (Task 12) runs before the first proof (Task 13), so the person running the proof sees the latencies it prints.
 - Open for execution, predating the metrics work: plan 03 expects a messaging brain module and plan 05's Task 14 (`install.ts`) provides the mount; when plan 05 executes, rule on the name so `MODULE_ORDER`'s `messaging` entry resolves to it and receives `ctx.metrics`.
+
+**Remote launcher (added 2026-10-25 at the owner's request; plan 04 Tasks 16 onward)**
+- A registration's `host` is `"local"` or a name from `os.json` `launcher.hosts`; the dispatcher refuses (`429 limit`, check `resources`) a host missing from `limits.launcher_hosts`. `launcher` is now `{ local, hosts[] }` (schema above), replacing the earlier `kind` union.
+- `LauncherRouter` (plan 04) picks `LocalLauncher` or `RemoteLauncher(host)` per registration; `Dispatcher`, reconcile and commands take the router where they took a `Launcher`.
+- `RemoteLauncher` runs `ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 <ssh> -- <swarm> os host <op>` with a JSON request on stdin and a JSON reply on stdout; ops `start`, `status`, `stop`, `resources`, `check`, `path`. Exit 255, a timeout or an unparseable reply is `unreachable`.
+- The instance token is never in argv on any launcher: it reaches `swarm run` as `SWARM_OS_TOKEN` (plan 01 reads it when `--os-token` is absent).
+- `Launcher.status` may answer `"unreachable"`; reconcile (plan 03) and the sweep (plan 04) keep such instances and recheck; only a host's own `"gone"` ends one. A `HostMonitor` periodic (60 s) probes each configured host with `resources`, keeps up or down per host, posts one system message per transition, holds new decisions for a down host with reason `host_unreachable`, and re-decides those cards when it returns.
+- Resources are per host: `GET /api/resources`, the SSE `resources` event and `hello.resources` carry `ResourceSnapshot[]`, local first (plans 03, 07, 08 render one line per host).
+- Provisioning seams, vendor-neutral (owner, 2026-10-25: nothing provider-specific, but easy to add): `RemoteLauncher` takes its target from a `HostProvider { kind; acquire(spec) → AcquiredHost; release(host, outcome); extraEnv?(spec) }`, with `StaticHostProvider` (configured hosts) the only implementation; the helper's `start` request carries an allowlisted `env` (never argv or logs) and a `workspace` discriminated union whose only member today is `{ kind: "existing"; cwd; swarmPath }`. A provider that creates a fresh machine per run is one new class.
+- Plan 04's Tasks 16–21 settle the shapes: `Launcher.kind` gains `"router"`; `Launcher` gains optional `release` and `ReleaseOutcome`; `RemoteLauncher({ provider })`; the SSE `resources` payload is `{ snapshots }`; `GET /api/resources` → `{ latest, history, hosts }`; `/health.hosts`; `swarm run --os` reads `SWARM_OS_TOKEN` and reports `stopped` on SIGTERM (plan 01).
+- `swarm os host <op>` lives in `packages/cli/src/cli/os-host.ts` (plan 04); plan 03's `os.ts` routes the `host` subcommand to it through an optional import, as it does other optional parts.

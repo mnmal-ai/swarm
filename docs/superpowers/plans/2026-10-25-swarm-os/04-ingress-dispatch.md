@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Cards on registered Trello and GitHub boards reach the brain by poll and by verified webhook, pass a recorded six-check policy chain, and become `swarm run --card` instances that the brain starts, watches, pauses, resumes, retries and stops within the limits on disk.
+**Goal:** Cards on registered Trello and GitHub boards reach the brain by poll and by verified webhook, pass a recorded six-check policy chain, and become `swarm run --card` instances that the brain starts, watches, pauses, resumes, retries and stops within the limits on disk, on its own machine or, over ssh, on another one (a brain on a server running a card on a Mac laptop on the owner's tailnet, for example).
 
-**Architecture:** `packages/os/src/ingress` holds thin REST clients that read boards with the brain's own credentials, a `Poller` and the webhook routes; both turn board state into `CardEvent`s. `packages/os/src/dispatch` holds the `Dispatcher`: a policy chain serialised per board whose every outcome is one `DispatchDecision` row per card version, the instance lifecycle (attach, heartbeat, exit, sweep), run control and the dispatch-backed operating commands. `packages/os/src/launcher` starts each run as a detached local process, and `packages/os/src/resources` samples the machine every 15 s. One `mountDispatch(host)` call puts all of it into plan 03's brain: routes on its server, events through its SSE `EventHub`, bodies for its periodic slots.
+**Architecture:** `packages/os/src/ingress` holds thin REST clients that read boards with the brain's own credentials, a `Poller` and the webhook routes; both turn board state into `CardEvent`s. `packages/os/src/dispatch` holds the `Dispatcher`: a policy chain serialised per board whose every outcome is one `DispatchDecision` row per card version, the instance lifecycle (attach, heartbeat, exit, sweep), run control and the dispatch-backed operating commands. `packages/os/src/launcher` starts each run as a detached local process, and `packages/os/src/resources` samples the machine every 15 s. Tasks 16 to 21 add the remote launcher: a `LauncherRouter` sends each registration's runs to the local launcher or to a `RemoteLauncher`, which reaches a named host from `os.json` with the system `ssh` and runs the `swarm os host` helper there (`packages/cli/src/cli/os-host.ts`, JSON on stdin and stdout), while a `HostMonitor` probes each host once a minute and holds its cards while it does not answer. One `mountDispatch(host)` call puts all of it into plan 03's brain: routes on its server, events through its SSE `EventHub`, bodies for its periodic slots.
 
 **Tech Stack:** TypeScript ESM (`.js` import suffixes), vitest, zod 4, global `fetch` with `AbortSignal.timeout`, `node:crypto` (HMAC-SHA1, HMAC-SHA256, `timingSafeEqual`, `createHash`), `node:child_process` (`spawn`, `execFile`), `node:fs`, `node:os`; plan 01's wire types from `@mnmal-ai/swarm-types`; plan 03's `EventHub`, `Tokens`, `reconcile` and `BrainModule`.
 
@@ -30,6 +30,7 @@
 - Logging only through plan 02's `createLogger(name)`; no `console.log` in `packages/os/src`.
 - Tests are vitest files under `packages/os/tests/`, on `MemoryOsStore`, `FakeClock`, `FakeEventHub`, `FakeLauncher`, `FakeBoardClient`, `FetchStub`, `FakeRoomOpener` and in-test fakes: no network, no real `~/.swarm`, temp dirs only from `mkdtemp`, `ANTHROPIC_API_KEY` unset. A test about an event asserts what was published and who may see it.
 - No new GitHub workflows and no trigger changes.
+- The instance token never appears in any child's argv (`swarm run`, `ssh`, `swarm os host`): it reaches the run only as `SWARM_OS_TOKEN` in its environment, and a remote host receives it on the ssh session's stdin (this supersedes the `--os-token <token>` in the first constraint and in Task 11, which Task 18 removes); remote hosts come only from `os.json` `launcher.hosts`, and a registration's host must be listed in `limits.launcher_hosts`.
 - Every class this plan adds that crosses a process, network, disk, database or model boundary, waits in a queue, or runs on a timer takes `metrics?: Metrics` (default `noopMetrics`) or reads `BrainContext.metrics`; Task 15 records the rows.
 - **Package gate**, the last check of every task: `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run` passes every file, and `pnpm --filter @mnmal-ai/swarm-os build` exits 0.
 
@@ -40,6 +41,7 @@
 3. **The brain restarts after minutes down while its instances keep running.** Expected: no instance is called unresponsive, and no owner is messaged, until 90 s pass after the restart with no heartbeat. Pinned in Task 9 (`REVIEW FOCUS 3`).
 4. **A board's API fails during polls** (rate limit, expired token, timeout, renamed queue column). Expected: that board's poll fails alone, the other registrations still poll, `lastPolledAt` stays at the last good poll, the board's room gets one message per failure streak and one when it recovers, and no credential appears anywhere. Pinned in Task 13 (`REVIEW FOCUS 4`); credentials in errors are pinned in Tasks 1 to 3.
 5. **A held card is edited, commented on, or re-polled many times.** Expected: the readiness check (the chief of staff's model once plan 06 fills the slot) is consulted once per card content, never once per version or per poll. Pinned in Task 5 (`REVIEW FOCUS 5`).
+6. **A laptop that runs a card goes to sleep mid-run** (lid closed, Wi-Fi lost), and wakes minutes later. Expected: its instance becomes `unresponsive` and is kept, because `status` answers `unreachable`, never `gone`; the owners get one `host_down` and one `host_up` message; new cards for that host are held quietly as `host_unreachable` and re-decided when it answers; the card in flight is never started twice, also when a start was sent but its answer lost (Task 19 stops such an orphan before re-deciding). This ranks second in importance, after item 1; it is numbered 6 so that the `REVIEW FOCUS` labels in Tasks 1 to 15 keep their numbers. Pinned in Task 19 (`REVIEW FOCUS 6`); the sweep's part in Task 18.
 
 ## Contracts consumed
 
@@ -59,6 +61,8 @@ Plans 02 and 03 are merged before this plan runs; plans 01 and 05 run alongside 
 | 05 | `Messaging` | satisfies this plan's `RoomOpener` structurally (`openRoom`, and `post` with `from: { id, kind }` and a `Provenance`); its `post` redacts, stores and publishes the `message` event | 4 to 14 |
 | 05 | commands | `registerCommand(spec, into?)` takes a `CommandSpec<A>` whose `args` is a `z.object` keyed by the positional words in order, booleans as `--key` flags; the executor turns argv into that object with `argvToArgs(spec, rest)` and enforces authority, limits, step-up, tripwires and the audit message around `run(ctx, args)`. `Participants.ensureParticipant(role, sessionId, instanceId)` names session participants by session id | 10, 14 |
 | 06 | chief of staff | fills the readiness slot (it applies `askFirst` in its `assess`), narrates decisions from `Dispatcher.onDecision`, and answers asks with `/dispatch` or `/hold` | 4, 7 |
+| 01 | token by environment | `swarm run --os <url>` reads the instance token from `SWARM_OS_TOKEN` when `--os-token` is absent (carry-forward "Remote launcher") | 16, 18 |
+| 03 | remote launcher (C28 to C30) | `OsConfig.launcher` is `{ local: boolean; hosts: Array<{ name; ssh; swarm; platform? }> }`; `packages/cli/src/cli/os.ts` routes `swarm os host …` to `./os-host.js` as `runOsHost(positional.slice(1), flags)` with no deps; reconcile keeps an instance whose `status` is `"unreachable"`; `hello.resources` and `/health`'s `hosts` read `services.dispatch.resources.latest()` and `services.hosts?.()` | 16, 18, 19 |
 
 ## File map
 
@@ -87,8 +91,14 @@ Plans 02 and 03 are merged before this plan runs; plans 01 and 05 run alongside 
 | `packages/os/src/testing/fetch-stub.ts`, `fake-board-client.ts`, `fake-room-opener.ts` | shared doubles, exported from `src/testing/index.ts` (append-only `// plan 04` block) | 1, 4 |
 | `packages/os/src/index.ts` | append-only `// plan 04` export block | 14 |
 | `packages/os/tests/dispatch/fixtures.ts`, `packages/os/tests/dispatch/harness.ts` | row builders, `FakeTokens` and the dispatcher harness the later tests use | 1, 6 |
+| `packages/os/src/launcher/host-protocol.ts`, `packages/os/src/launcher/host-inspect.ts` | the brain-to-host wire (requests, replies, the workspace union), `inspectPath` | 16 |
+| `packages/cli/src/cli/os-host.ts` | `swarm os host <op>` on a target host, and the operator's `swarm os host check <name>` | 16, 21 |
+| `packages/os/src/launcher/host-provider.ts`, `packages/os/src/launcher/remote.ts` | `HostProvider`, `StaticHostProvider`; `RemoteLauncher` over the system `ssh` | 17 |
+| `packages/os/src/launcher/router.ts` | `LauncherRouter`: local or remote by host | 18 |
+| `packages/os/src/launcher/host-monitor.ts` | `HostMonitor`: probes, up and down, `host_unreachable`, orphans | 19 |
+| `packages/os/tests/launcher/__fixtures__/fake-ssh.mjs`, `fake-host.mjs`, `packages/os/tests/launcher/ssh-rig.ts`, `packages/cli/tests/__fixtures__/os-host-shim.ts` | the fake `ssh`, a scripted host, and the real helper as a test host | 17 |
 
-`packages/os/src/launcher/remote.ts` (the remote launcher) is a later plan, not this one. Only `LocalLauncher` assumes the brain shares a filesystem with an instance.
+Only `LocalLauncher` assumes the brain shares a filesystem with an instance; `RemoteLauncher` and the helper share nothing but the ssh session.
 
 ## Room notices
 
@@ -113,6 +123,9 @@ Every notice is `DispatchRooms.say(room, body, { notice, kind?, cardRef?, instan
 | `login_expired` | system | `Login expired on <project> (<instance>). Held boards: <board>, <board>. Log in on the host, then /resume board <name>.` |
 | `pause_requested`, `stop_requested` | instance | `Pause requested by <by>: the run finishes its task, checkpoints and exits.`, `Stop requested by <by> (<graceful or immediate>).` |
 | `poll_failed`, `poll_recovered` | board | `Polling <board> failed (<code>): <message>. Retrying every <poll_interval_seconds> s.`, `Polling <board> recovered after <n> failed polls.` |
+| `host_down` (Task 19) | system | `<host> is unreachable (<detail>). Live instances there: <n>, kept and rechecked. New cards for <boards> are held until it answers.` |
+| `host_up` (Task 19) | system | `<host> answers again after <downtime>. Held cards for <boards> are being re-decided.` |
+| `orphan_stopped` (Task 19) | board | `<instance> had started on <host> although the brain never heard back; it was stopped before <k> is decided again.` |
 
 `unknown_board` is said at most once per board per 24 h, with the spec's drafted registration in its data: `draft { boardId, boardName, kind, externalId, queueColumn }`, for an owner's `/register`. Inferring the project, repo and stack from the swarm directories on the machine is `register`'s work (plan 08); nothing is created here. `refused` is said only when the card's previous decision had another outcome or reason.
 
@@ -122,7 +135,7 @@ Every notice is `DispatchRooms.say(room, body, { notice, kind?, cardRef?, instan
 |---|---|---|---|
 | `instance` | `{ instance: InstanceView }`: the row with `tokenHash: ""` plus its registration's `projectName` | `staffOnly`: actor kind `human`, `host` or `cos` | `mountDispatch`, on every instance change |
 | `decision` | `{ decision: DispatchDecisionRow }` | `staffOnly` | `mountDispatch`, on every decision change |
-| `resources` | `{ snapshot: ResourceSnapshot }` | `staffOnly` | `ResourceMonitor.sample()` |
+| `resources` | `{ snapshot: ResourceSnapshot }`; from Task 19, `{ snapshots: ResourceSnapshot[] }`, one per host, the brain's own machine first | `staffOnly` | `ResourceMonitor.sample()`; from Task 19, `ResourceMonitor.record()` (its own sample and each host probe) |
 | `command` | `{ argv: InstanceCommandArgv }`: `["pause"]` or `["stop", "graceful" \| "immediate"]` | `instanceOnly(id)`: `actor.kind === "instance" && actor.instanceId === id` | `RunControl`, through `publishInstanceCommand` (plan 05 publishes `["answer", questionId, body]` with the same helper) |
 
 A `command` published while its run is not attached to its stream waits in the hub's ring buffer and is replayed when the run reconnects with `Last-Event-ID`, so the dispatcher keeps no retry of its own. The ring buffer does not survive a brain restart; the pending request persisted on the instance row does, and `DispatchModule.start()` publishes it once more (Tasks 10 and 14).
@@ -2745,7 +2758,7 @@ export function lifetimeOutcome(state: InstanceRow["state"], exitReason: string 
 // packages/os/src/dispatch/instance-metrics.ts
 export const INSTANCE_RECORD_EVERY_MS = 300_000;
 export const INSTANCE_ENDED_KEEP_MS = 3_600_000;
-export interface InstanceMetricsRecord { r: "instance"; instanceId: string; at: number; snapshot: MetricsSnapshot }
+export interface InstanceMetricsRecord { r: "instance"; instanceId: string; at: number; snapshot: MetricsSnapshot }   // use plan 10's `InstanceRecord` type; the snapshot written must carry all four arrays (`defs`, `counters`, `gauges`, `histograms`, `defs` may be empty) or plan 10's reader skips it as malformed
 export const MetricsForwardSchema: z.ZodType<MetricsForwardBody<MetricsSnapshot>>;   // at a number; defs, counters, gauges, histograms arrays of the shapes MetricsSnapshot names
 export class InstanceMetricsStore {
   constructor(opts: { clock: Clock; write?: (record: InstanceMetricsRecord) => void; metrics?: Metrics; maxEntries?: number });   // maxEntries default 200
@@ -3267,4 +3280,1510 @@ Expected: PASS, the three new files and every earlier test (with the route lists
 git add packages/metrics/src/catalogue/os.ts packages/os/src/ingress packages/os/src/dispatch packages/os/src/launcher packages/os/src/resources \
   packages/os/src/testing/fetch-stub.ts packages/os/src/index.ts packages/os/tests/dispatch packages/os/tests/metrics
 git -c commit.gpgsign=false commit -m "feat(os): measure ingress, dispatch, the launcher and instances, and keep each instance's forwarded metrics"
+```
+
+---
+
+## Remote launcher (Tasks 16 to 21)
+
+Added 2026-10-25 at the owner's request: a brain deployed on a server (for example in AWS) runs a card's instance on a Mac, including a laptop on the owner's tailnet. The binding decisions are the overview's **Remote launcher** block and the spec's "Instances on other machines"; plan 03 provides C28 to C30 (`launcher: { local, hosts[] }`, the `swarm os host` route in `os.ts`, reconcile keeping `"unreachable"` instances, per-host resources in `hello` and `/health`). Nothing here is vendor-specific, but three seams are explicit so a provider that creates a fresh machine per run (an API-provisioned macOS VM, for example) can be added later as one new class:
+
+- **Host provider.** `RemoteLauncher` gets its target from a `HostProvider` (`acquire(spec)`, `release(host, outcome)`, optional `extraEnv(spec)` and `locate(name)`), never from `os.json` directly. The one implementation is `StaticHostProvider` over `launcher.hosts`.
+- **Credentials channel.** The helper's `start` request carries `env`, which reaches the run's environment and never an argv or a log (the helper logs the keys only). The brain sends only `HOST_ENV_ALLOWLIST` (`SWARM_OS_TOKEN`, `SWARM_OS_INSTANCE_ID`, `SWARM_OS_CONTEXT`) plus whatever the provider's `extraEnv` adds for its own machines.
+- **Workspace kind.** The `start` request carries `workspace: { kind: "existing"; cwd; swarmPath }`, a discriminated union with one member today; the helper refuses any other kind by name, so a later `{ kind: "clone"; repoUrl; ref; swarmPath }` is an addition.
+
+Order and gates: Task 16 is the helper on the target (CLI side) and the wire protocol it shares with the brain; Task 17 is `RemoteLauncher` alone, proved over a fake `ssh` and then end to end through the real helper; Task 18 routes the brain through `LauncherRouter` and moves the token off every command line; Task 19 is the host monitor, the `host_unreachable` holds and per-host resources; Task 20 measures the remote path; Task 21 is the operator's `swarm os host check <name>` and the opt-in real-host test.
+
+**Tests never need a second machine.** A fake `ssh` (Task 17's `tests/launcher/__fixtures__/fake-ssh.mjs`, written into a temporary directory as an executable `ssh`) drops ssh's options and runs the remote command locally with `/bin/sh -c`, under a temporary `HOME`, as sshd would. The helper never runs a real `swarm run` in a test: its run command is the injectable `OsHostDeps.runCommand`, which tests set to `[process.execPath, <Task 11's fake-run.mjs>]`. Production never sets it: `runOsHost` receives deps only from code (plan 03's `os.ts` passes none), the start request schema is strict (a `runCommand` key in the JSON is a `bad_request`), and no environment variable is read for it; Task 16 pins all three.
+
+---
+
+### Task 16: The host protocol and the `swarm os host` helper
+
+**Files:**
+- Create: `packages/os/src/launcher/host-protocol.ts`, `packages/os/src/launcher/host-inspect.ts`
+- Modify: `packages/os/src/launcher/local.ts` (extract `machineSnapshot`; `LocalLauncher.resources` calls it), `packages/os/src/index.ts` (the `// plan 04` block)
+- Create: `packages/cli/src/cli/os-host.ts`
+- Test: `packages/os/tests/launcher/host-protocol.test.ts`, `packages/cli/tests/os-host.test.ts`
+
+**Interfaces:**
+- Consumes: Task 4's `ResourceSnapshot`, `UsageSource`; Task 11's `LocalLauncher`, `INHERITED_ENV`, `countClaudeProcesses`, `fake-run.mjs`; zod; `swarmSelfCommand()` (`packages/cli/src/cli/codex-hook.ts`); `VERSION` (`packages/cli/src/version.ts`, generated); plan 03's route of `swarm os host <op>` to `./os-host.js` (ruling C29), which calls `runOsHost(positional.slice(1), flags)` and passes no deps.
+- Produces:
+
+```ts
+// packages/os/src/launcher/host-protocol.ts: the wire between RemoteLauncher (brain) and `swarm os host` (target)
+export const HOST_PROTOCOL = 1;
+export const HOST_OPS: readonly ["start", "status", "stop", "resources", "check", "path"];
+export type HostOp = (typeof HOST_OPS)[number];
+export const INSTANCE_ID_PATTERN: RegExp;   // /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/: safe as a file name
+export const CARD_ID_PATTERN: RegExp;       // /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/: never read as a flag
+export const ENV_NAME_PATTERN: RegExp;      // /^[A-Z][A-Z0-9_]{0,63}$/
+export const HOST_ENV_DENIED: RegExp;       // /^(PATH|HOME|SHELL|USER|LOGNAME|TMPDIR|NODE_OPTIONS|NODE_PATH|LD_[A-Z0-9_]*|DYLD_[A-Z0-9_]*)$/
+export const AbsolutePath: z.ZodType<string>;   // starts with "/", no NUL, at most 1024 characters
+export const ExistingWorkspaceSchema: z.ZodObject<…>;   // z.object({ kind: z.literal("existing"), cwd: AbsolutePath, swarmPath: AbsolutePath }).strict()
+export const WorkspaceSchema: z.ZodDiscriminatedUnion<…>;   // z.discriminatedUnion("kind", [ExistingWorkspaceSchema]): one member today
+export type Workspace = z.infer<typeof WorkspaceSchema>;
+export const HostStartRequestSchema: z.ZodObject<…>;      // strict { instanceId: INSTANCE_ID_PATTERN, workspace: WorkspaceSchema, cardId: CARD_ID_PATTERN, brainUrl: http(s) URL, env: record(ENV_NAME_PATTERN and not HOST_ENV_DENIED → string ≤ 65536 chars), fresh: boolean default false }
+export const HostStatusRequestSchema: z.ZodObject<…>;     // strict { instanceId, handle: /^(\d{1,10})?$/, swarmPath?: AbsolutePath, cardId?: CARD_ID_PATTERN }
+export const HostStopRequestSchema: z.ZodObject<…>;       // the status fields plus mode: "graceful" | "immediate"
+export const HostResourcesRequestSchema: z.ZodObject<…>;  // strict { host: string 1..63 }
+export const HostCheckRequestSchema: z.ZodObject<…>;      // strict { paths: AbsolutePath[] (at most 20) default [] }
+export const HostPathRequestSchema: z.ZodObject<…>;       // strict { path: AbsolutePath }
+export type HostStartRequest = z.infer<typeof HostStartRequestSchema>;   // and HostStatusRequest, HostStopRequest, HostResourcesRequest, HostCheckRequest, HostPathRequest
+export interface HostRequests { start: HostStartRequest; status: HostStatusRequest; stop: HostStopRequest; resources: HostResourcesRequest; check: HostCheckRequest; path: HostPathRequest }
+export const HOST_REQUEST_SCHEMAS: { [O in HostOp]: z.ZodType<HostRequests[O]> };
+export interface PathReport { exists: boolean; directory: boolean; swarmDir: boolean; realPath: string | null }
+export const NO_PATH: PathReport;                          // { exists: false, directory: false, swarmDir: false, realPath: null }
+export interface HostCheckItem { name: string; status: "ok" | "missing" | "unknown"; detail: string; fix: string | null }
+export type HostErrorCode = "bad_request" | "unsupported_workspace" | "not_found" | "not_swarm_dir" | "spawn_failed" | "internal";
+export interface HostReplies {
+  start: { handle: string; reused: boolean };              // handle: the run's pid
+  status: { status: "running" | "gone" };
+  stop: { result: "signalled" | "stopped" | "killed" | "not_running" };
+  resources: { snapshot: ResourceSnapshot };
+  check: { version: string; platform: string; items: HostCheckItem[] };
+  path: PathReport;
+}
+export type HostReply<O extends HostOp> = { ok: true; protocol: number } & HostReplies[O];
+export interface HostErrorReply { ok: false; protocol: number; error: { code: HostErrorCode; message: string } }
+export const ResourceSnapshotSchema: z.ZodType<ResourceSnapshot>;
+export const HOST_REPLY_SCHEMAS: { [O in HostOp]: z.ZodType<HostReply<O> | HostErrorReply> };
+export function parseHostReply<O extends HostOp>(op: O, stdout: string): HostReply<O> | HostErrorReply | null;   // the last stdout line that is a JSON object matching the op's reply schema; null when none does
+export function hostError(code: HostErrorCode, message: string): HostErrorReply;
+
+// packages/os/src/launcher/host-inspect.ts
+export function inspectPath(path: string): Promise<PathReport>;   // swarmDir: a directory holding swarm.json, what discoverSwarmPath looks for; realPath through fs.realpath
+
+// packages/os/src/launcher/local.ts (extracted, behaviour unchanged)
+export function machineSnapshot(host: string, ps: () => Promise<string>, usage?: UsageSource, now?: Date): Promise<ResourceSnapshot>;   // what LocalLauncher.resources() returns
+
+// packages/cli/src/cli/os-host.ts
+export interface ExecResult { code: number; stdout: string; stderr: string }
+export type HostExec = (file: string, args: string[], opts?: { env?: NodeJS.ProcessEnv; cwd?: string; timeoutMs?: number }) => Promise<ExecResult>;   // ENOENT → code 127
+export interface OsHostDeps {
+  stdin?: () => Promise<string>;               // default: all of process.stdin, at most 1 MiB
+  stdinIsTty?: boolean;                        // default process.stdin.isTTY === true
+  out?: (line: string) => void;                // default process.stdout.write(line + "\n")
+  err?: (line: string) => void;
+  env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; now?: () => Date;
+  exec?: HostExec;                             // default execFile, 15 s timeout
+  kill?: (pid: number, signal: NodeJS.Signals | 0) => void;   // default process.kill
+  psArgs?: (pid: number) => Promise<string | null>;           // default `ps -o args= -p <pid>`, null on a non-zero exit
+  psAll?: () => Promise<string>;               // default `ps -A -o args=`
+  sleep?: (ms: number) => Promise<void>;
+  keepAwake?: (pid: number) => void;           // default on darwin: a detached `/usr/bin/caffeinate -i -w <pid>` when that file exists; elsewhere nothing
+  runCommand?: string[];                       // how to start `swarm run`; default defaultRunCommand(). A test seam only
+  version?: string;                            // default VERSION
+}
+export const STOP_KILL_AFTER_MS = 10_000;
+export const STOP_POLL_MS = 250;
+export function runOsHost(args: string[], flags: Record<string, string>, deps?: OsHostDeps): Promise<number>;   // args: the words after `os host`, the op first
+export function defaultRunCommand(): string[];   // swarmSelfCommand()
+export function hostRunArgv(req: HostStartRequest): string[];
+export function hostRunEnv(req: HostStartRequest, parent: NodeJS.ProcessEnv, platform: NodeJS.Platform, selfDir: string | null): Record<string, string>;
+export function hostPath(parentPath: string | undefined, platform: NodeJS.Platform, selfDir: string | null): string;
+export function isSwarmRunArgs(args: string, cardId?: string): boolean;
+export function hostCheck(req: HostCheckRequest, deps: OsHostDeps): Promise<HostReplies["check"]>;
+```
+
+**The helper.** `swarm os host <op>` is run by the brain over ssh, never by a person: it reads one JSON request on stdin and writes exactly one JSON line on stdout (`protocol: HOST_PROTOCOL` in every reply), exit 0 for `ok: true` and 1 for an error reply. Nothing else is ever written to stdout, and no value from a request is ever echoed: a schema failure answers `bad_request` with each issue as `<path>: <zod message>`, which names fields, not their values (the token is a value).
+- Entry: an op outside `HOST_OPS`, or extra words after it, prints `usage: swarm os host <start|status|stop|resources|check|path> < request.json` to stderr and returns 2 (Task 21 gives `check <name>` its own meaning). A TTY on stdin prints `swarm os host <op> is run by the brain over ssh and reads one JSON request on stdin. To check a host from the brain, run: swarm os host check <name>` to stderr and returns 2. Input that is not JSON → `bad_request` (`the request is not JSON`). For `start`, a `workspace` object whose `kind` is a string other than `"existing"` → `unsupported_workspace` (`workspace kind "<kind>" is not supported by swarm <version> (host protocol 1); this host runs a card only in an existing checkout`) before the schema runs. Then the op's schema from `HOST_REQUEST_SCHEMAS`.
+- `start`, in order: (1) `inspectPath(workspace.swarmPath)` not a swarm dir → `not_swarm_dir` (`<swarmPath> is not a swarm directory (no swarm.json)`); `workspace.cwd` not a directory → `not_found`. (2) The record `<swarmPath>/os-instances/<instanceId>.json`: when it exists and its pid is a live swarm run (as `status` decides), answer `{ handle: String(pid), reused: true }` and start nothing, so a start retried after a lost reply never starts a card twice. (3) Create `<swarmPath>/os-instances` and `<swarmPath>/logs` with mode `0700`, writing a `.gitignore` of `*\n` into each one the helper itself created (an existing directory is left alone), and open `<swarmPath>/logs/os-<instanceId>.log` for append, mode `0600`. Write one header line: `<now ISO> os host start <instanceId> card <cardId> env keys: <the keys of req.env plus SWARM_OS_INSTANCE_ID, without repeats, sorted, joined ", ">`: keys only, never values. (4) `spawn(runCommand[0], [...runCommand.slice(1), ...hostRunArgv(req)], { cwd: workspace.cwd, env: hostRunEnv(req, env, platform, selfDir), detached: true, stdio: ["ignore", fd, fd] })`, so the run has its own session, survives the ssh session's end, and its output goes to the log rather than the session (which would otherwise stay open). No pid → wait for `error` → `spawn_failed` with its message. Write the record `{ pid, startedAt }` (mode `0600`), `child.unref()`, close the fd, `keepAwake(pid)`, and answer `{ handle: String(pid), reused: false }`.
+- `hostRunArgv`: `["run", "--card", cardId, "--yes", "--no-tree", "--swarm-path", workspace.swarmPath, "--os", brainUrl]`, plus `"--fresh"` when `fresh`. The token is never in it.
+- `hostRunEnv`: the `INHERITED_ENV` keys the helper's own environment has, with `PATH` replaced by `hostPath(...)`; then `req.env`; then `SWARM_OS_INSTANCE_ID: req.instanceId`, set last. Nothing else from the ssh session reaches the run.
+- `hostPath`: the session's `PATH` entries, then `/opt/homebrew/bin` and `/usr/local/bin` on darwin, then `selfDir` (the directory of the swarm binary when it is a single-file Bun build, `dirname(process.execPath)`; else null), empty and repeated entries dropped, joined with `:`. A non-interactive ssh session on macOS gets `/usr/bin:/bin:/usr/sbin:/sbin`, where neither Docker, Claude Code nor gh is found; `check` probes with the same `PATH`, so it reports what the run will see.
+- `status`: pid = `Number(handle)` when the handle is non-empty, else the record's pid (none without `swarmPath`); no pid → `gone`; `kill(pid, 0)` throwing `ESRCH` → `gone`, and the record is removed; otherwise `psArgs(pid)` must satisfy `isSwarmRunArgs(args, cardId)`, else `gone` (the pid was reused).
+- `isSwarmRunArgs`: the whitespace-split words contain `run` and, after it, `--card`; with a `cardId`, the word after `--card` is exactly that id.
+- `stop`: the pid as `status` finds it; not running → `not_running`. `graceful` → `kill(pid, "SIGINT")`, `swarm run`'s graceful pause → `signalled`. `immediate` → `kill(pid, "SIGTERM")`, then every `STOP_POLL_MS` up to `STOP_KILL_AFTER_MS` `kill(pid, 0)`: gone → `stopped`; still there after 10 s → `kill(-pid, "SIGKILL")` (the run's own process group; a project's Substrate sidecars run in groups of their own) → `killed`. `ESRCH` is ignored; the record is removed once the process is gone.
+- `resources`: `{ snapshot: await machineSnapshot(req.host, psAll) }`: the same code as the brain's `LocalLauncher.resources()`, with no usage source, so `instancesRunning`, `portsInUse` and `tokensThisHour` are zero and empty; the brain fills them from its own rows (Task 17).
+- `path`: `inspectPath(req.path)`.
+- `check` (`hostCheck`): every probe runs through `exec` with `{ PATH: hostPath(...), HOME }` and a 15 s timeout; an `ok` item's detail is the probe's first stdout line, trimmed, unless said otherwise. In this order, one item each: `swarm` (always `ok`, `<version> (host protocol 1)`); `node` (`$SWARM_NODE --version` when set, else `node --version`; `ok` at 26.2 or newer, else `missing`, `v26.1.0 is older than 26.2, which the Substrate sidecars need`, fix `install Node 26.2 or newer, or set SWARM_NODE`); `docker` (`docker --version`); `docker_daemon` (`docker info --format {{.ServerVersion}}` exit 0; else `missing`, `the Docker daemon is not running`, fix `start Docker, or point the project's substrate config at an already-running loopback Postgres (postgres_url without compose_file)`: a host without Docker works today when the project's Substrate config names a running Postgres that way, and nothing is built for it here); `claude` (`claude --version`); `claude_login` (`claude auth status`: exit 0 → `ok`; output that says the user is not logged in → `missing`, fix `log in to Claude Code on this host (claude, then /login)`; anything else, including an unknown subcommand → `unknown`, `could not tell: claude auth status is not available`. Confirm the subcommand against the installed Claude Code's `--help` when implementing; the check never reports `ok` without exit 0); `gh` (`gh --version`). Then for each path `p`: `path:<p>` (`inspectPath`: `ok` when it is a swarm dir), `repo:<p>` (`git -C <dirname p> rev-parse --is-inside-work-tree` exit 0), `github:<p>` (when `<p>/config.json` names `source_control.github_account` `<login>`: `gh auth token --user <login>` exit 0 → `ok`, detail `<login>`; else `gh auth status` exit 0 → `ok`, detail `gh's active account`; otherwise `missing`, fix `gh auth login as <login> on this host`). The token `gh auth token` prints is discarded, never put in a detail. A probe that is not installed (code 127) is `missing` with fix `install <tool> on this host`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// packages/os/tests/launcher/host-protocol.test.ts
+import { describe, it, expect } from "vitest";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HostStartRequestSchema, parseHostReply, NO_PATH } from "../../src/launcher/host-protocol.js";
+import { inspectPath } from "../../src/launcher/host-inspect.js";
+
+const OK = { instanceId: "inst-r1", workspace: { kind: "existing", cwd: "/path/to/project-a", swarmPath: "/path/to/project-a/.swarm" }, cardId: "card-1", brainUrl: "https://os.example", env: { SWARM_OS_TOKEN: "inst_secret_r1" } };
+
+describe("host protocol", () => {
+  it("accepts a start in an existing checkout and refuses anything else without repeating its values", () => {
+    expect(HostStartRequestSchema.parse(OK)).toEqual({ ...OK, fresh: false });
+    const bad = [
+      { ...OK, runCommand: ["/bin/sh"] },
+      { ...OK, env: { SWARM_OS_TOKEN: "inst_secret_r1", NODE_OPTIONS: "--require /path/to/x.js" } },
+      { ...OK, env: { lower_case: "x" } },
+      { ...OK, workspace: { ...OK.workspace, cwd: "relative/dir" } },
+      { ...OK, brainUrl: "file:///path/to/socket" },
+      { ...OK, cardId: "--help" },
+      { ...OK, instanceId: "../inst" },
+      { ...OK, workspace: { kind: "clone", repoUrl: "https://github.com/owner-a/repo-a", ref: "main", swarmPath: "/path/to/project-a/.swarm" } },
+    ];
+    for (const request of bad) {
+      const result = HostStartRequestSchema.safeParse(request);
+      expect(result.success, JSON.stringify(Object.keys(request))).toBe(false);
+      expect(JSON.stringify(result.error?.issues ?? [])).not.toContain("inst_secret_r1");
+    }
+  });
+
+  it("reads the last JSON line of a reply, and nothing that does not match the op", () => {
+    expect(parseHostReply("status", 'Last login: Sun Oct 25 08:00:00\n{"ok":true,"protocol":1,"status":"running"}\n')).toEqual({ ok: true, protocol: 1, status: "running" });
+    expect(parseHostReply("status", '{"ok":false,"protocol":1,"error":{"code":"not_found","message":"no such instance"}}')).toEqual({ ok: false, protocol: 1, error: { code: "not_found", message: "no such instance" } });
+    expect([parseHostReply("status", "zsh: command not found: swarm\n"), parseHostReply("status", '{"ok":true,"protocol":1,"status":"sleeping"}'), parseHostReply("start", "")]).toEqual([null, null, null]);
+  });
+
+  it("calls a directory holding swarm.json a swarm directory", async () => {
+    const dir = realpathSync(await mkdtemp(join(tmpdir(), "swarm-os-inspect-")));
+    await mkdir(join(dir, "project-a", ".swarm"), { recursive: true });
+    await writeFile(join(dir, "project-a", ".swarm", "swarm.json"), "{}");
+    expect(await inspectPath(join(dir, "project-a", ".swarm"))).toEqual({ exists: true, directory: true, swarmDir: true, realPath: join(dir, "project-a", ".swarm") });
+    expect(await inspectPath(join(dir, "project-a"))).toEqual({ exists: true, directory: true, swarmDir: false, realPath: join(dir, "project-a") });
+    expect(await inspectPath(join(dir, "missing"))).toEqual(NO_PATH);
+  });
+});
+```
+
+```ts
+// packages/cli/tests/os-host.test.ts
+import { describe, it, expect } from "vitest";
+import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { HostStartRequestSchema } from "@mnmal-ai/swarm-os";
+import { runOsHost, hostRunArgv, hostPath, isSwarmRunArgs, defaultRunCommand, STOP_KILL_AFTER_MS, type OsHostDeps, type HostExec, type ExecResult } from "../src/cli/os-host.js";
+import { swarmSelfCommand } from "../src/cli/codex-hook.js";
+
+const FAKE_RUN = fileURLToPath(new URL("../../os/tests/launcher/__fixtures__/fake-run.mjs", import.meta.url));
+const TOKEN = "inst_secret_r1";
+const ESRCH = () => Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+
+async function project() {
+  const dir = realpathSync(await mkdtemp(join(tmpdir(), "swarm-os-host-")));
+  const cwd = join(dir, "project-a");
+  const swarmPath = join(cwd, ".swarm");
+  await mkdir(swarmPath, { recursive: true });
+  await writeFile(join(swarmPath, "swarm.json"), "{}");
+  return { dir, cwd, swarmPath };
+}
+function host(stdin: unknown, over: OsHostDeps = {}) {
+  const out: string[] = [], err: string[] = [];
+  const deps: OsHostDeps = {
+    stdin: async () => (typeof stdin === "string" ? stdin : JSON.stringify(stdin)), stdinIsTty: false, out: (l) => out.push(l), err: (l) => err.push(l),
+    runCommand: [process.execPath, FAKE_RUN], keepAwake: () => {}, env: { PATH: process.env.PATH, HOME: "/path/to/home", LEAK_CHECK: "1" }, ...over,
+  };
+  return { deps, out, err, reply: () => JSON.parse(out.at(-1) ?? "null") };
+}
+const startRequest = (p: { cwd: string; swarmPath: string }, over: Record<string, unknown> = {}) => ({
+  instanceId: "inst-r1", workspace: { kind: "existing", cwd: p.cwd, swarmPath: p.swarmPath }, cardId: "card-1", brainUrl: "https://os.example",
+  env: { SWARM_OS_TOKEN: TOKEN, SWARM_OS_INSTANCE_ID: "inst-r1", SWARM_OS_CONTEXT: "Use staging" }, fresh: false, ...over,
+});
+async function lineIn(file: string, re: RegExp): Promise<string> {
+  for (let i = 0; i < 250; i++) {
+    const hit = (existsSync(file) ? await readFile(file, "utf8") : "").split("\n").find((l) => re.test(l));
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`no line matching ${re} in ${file}`);
+}
+
+describe("swarm os host", () => {
+  it("starts swarm run detached in the checkout, with the token only in its environment, and records it", async () => {
+    const p = await project();
+    const awake: number[] = [];
+    const h = host(startRequest(p), { keepAwake: (pid) => awake.push(pid) });
+    expect(await runOsHost(["start"], {}, h.deps)).toBe(0);
+    const reply = h.reply();
+    expect([reply, h.out.length]).toEqual([{ ok: true, protocol: 1, handle: expect.stringMatching(/^\d+$/), reused: false }, 1]);
+    const log = join(p.swarmPath, "logs", "os-inst-r1.log");
+    const first = JSON.parse(await lineIn(log, /^\{/)) as { argv: string[]; cwd: string; env: string[] };
+    expect(first.argv).toEqual(["run", "--card", "card-1", "--yes", "--no-tree", "--swarm-path", p.swarmPath, "--os", "https://os.example"]);
+    expect(realpathSync(first.cwd)).toBe(p.cwd);
+    expect(first.env).toEqual(expect.arrayContaining(["SWARM_OS_TOKEN", "SWARM_OS_INSTANCE_ID", "SWARM_OS_CONTEXT", "PATH", "HOME"]));
+    expect(first.env).not.toContain("LEAK_CHECK");
+    const text = await readFile(log, "utf8");
+    expect(text.split("\n")[0]).toMatch(/ os host start inst-r1 card card-1 env keys: SWARM_OS_CONTEXT, SWARM_OS_INSTANCE_ID, SWARM_OS_TOKEN$/);
+    expect(text + h.out.join("") + h.err.join("")).not.toContain(TOKEN);
+    expect(JSON.parse(await readFile(join(p.swarmPath, "os-instances", "inst-r1.json"), "utf8"))).toMatchObject({ pid: Number(reply.handle) });
+    expect(await readFile(join(p.swarmPath, "os-instances", ".gitignore"), "utf8")).toBe("*\n");
+    expect(awake).toEqual([Number(reply.handle)]);
+
+    const again = host(startRequest(p));
+    await runOsHost(["start"], {}, again.deps);
+    expect(again.reply()).toEqual({ ok: true, protocol: 1, handle: reply.handle, reused: true });
+    const byId = host({ instanceId: "inst-r1", handle: "", swarmPath: p.swarmPath, cardId: "card-1" });
+    await runOsHost(["status"], {}, byId.deps);
+    expect(byId.reply()).toEqual({ ok: true, protocol: 1, status: "running" });
+    const graceful = host({ instanceId: "inst-r1", handle: reply.handle, mode: "graceful" });
+    await runOsHost(["stop"], {}, graceful.deps);
+    expect(graceful.reply()).toEqual({ ok: true, protocol: 1, result: "signalled" });
+    await lineIn(log, /^SIGINT 1$/);
+    const now = host({ instanceId: "inst-r1", handle: reply.handle, swarmPath: p.swarmPath, mode: "immediate" });
+    await runOsHost(["stop"], {}, now.deps);
+    expect(now.reply()).toEqual({ ok: true, protocol: 1, result: "stopped" });      // fake-run has no SIGTERM handler, so it ends at once
+    const gone = host({ instanceId: "inst-r1", handle: reply.handle });
+    await runOsHost(["status"], {}, gone.deps);
+    expect(gone.reply()).toEqual({ ok: true, protocol: 1, status: "gone" });
+    expect(existsSync(join(p.swarmPath, "os-instances", "inst-r1.json"))).toBe(false);
+  }, 20_000);
+
+  it("refuses what it cannot trust, without echoing a value back", async () => {
+    const p = await project();
+    const cases: Array<[unknown, string]> = [
+      ["not json", "bad_request"],
+      [startRequest(p, { runCommand: ["/bin/sh"] }), "bad_request"],
+      [startRequest(p, { env: { SWARM_OS_TOKEN: TOKEN, PATH: "/path/to/elsewhere" } }), "bad_request"],
+      [startRequest(p, { cardId: "--help" }), "bad_request"],
+      [startRequest(p, { instanceId: "../inst" }), "bad_request"],
+      [startRequest(p, { workspace: { kind: "clone", repoUrl: "https://github.com/owner-a/repo-a", ref: "main", swarmPath: p.swarmPath } }), "unsupported_workspace"],
+      [startRequest({ cwd: p.cwd, swarmPath: p.cwd }), "not_swarm_dir"],
+    ];
+    for (const [request, code] of cases) {
+      const h = host(request);
+      expect(await runOsHost(["start"], {}, h.deps), code).toBe(1);
+      expect(h.reply(), code).toMatchObject({ ok: false, protocol: 1, error: { code } });
+      expect(h.out.join("") + h.err.join(""), code).not.toContain(TOKEN);
+    }
+    const clone = host(cases[5][0]);
+    await runOsHost(["start"], {}, clone.deps);
+    expect(clone.reply().error.message).toMatch(/^workspace kind "clone" is not supported by swarm .+ \(host protocol 1\)/);
+    expect(existsSync(join(p.swarmPath, "os-instances"))).toBe(false);
+    const tty = host({}, { stdinIsTty: true });
+    expect(await runOsHost(["status"], {}, tty.deps)).toBe(2);
+    expect([tty.out, tty.err[0]]).toEqual([[], expect.stringContaining("swarm os host check <name>")]);
+    expect(await runOsHost(["reboot"], {}, host({}).deps)).toBe(2);
+  });
+
+  it("calls a pid gone unless it is a live swarm run on that card", async () => {
+    const ask = async (handle: string, args: string | null, alive = true) => {
+      const h = host({ instanceId: "inst-r1", handle, cardId: "card-1" }, { psArgs: async () => args, kill: () => { if (!alive) throw ESRCH(); } });
+      await runOsHost(["status"], {}, h.deps);
+      return h.reply().status;
+    };
+    expect(await ask("4242", "/path/to/swarm run --card card-1 --yes --no-tree")).toBe("running");
+    expect(await ask("4242", "/path/to/swarm run --card card-2 --yes")).toBe("gone");      // the pid now runs another card
+    expect(await ask("4242", "/usr/bin/vim notes.md")).toBe("gone");                       // the pid was reused
+    expect(await ask("4242", null, false)).toBe("gone");
+    expect(await ask("", null)).toBe("gone");                                              // no handle and no record
+    expect([isSwarmRunArgs("node /path/to/main.js run --card 7 --os https://os.example", "7"), isSwarmRunArgs("swarm runner --card 7"), isSwarmRunArgs("swarm run --yes")]).toEqual([true, false, false]);
+  });
+
+  it("stops at once with SIGTERM, and SIGKILLs the run's group after 10 s", async () => {
+    let alive = true, slept = 0;
+    const sent: Array<[number, NodeJS.Signals]> = [];
+    const base: OsHostDeps = { psArgs: async () => "swarm run --card card-1", kill: (pid, sig) => { if (sig === 0) { if (!alive) throw ESRCH(); return; } sent.push([pid, sig]); }, sleep: async (ms) => { slept += ms; } };
+    const killed = host({ instanceId: "inst-r1", handle: "4242", mode: "immediate" }, base);
+    await runOsHost(["stop"], {}, killed.deps);
+    expect([sent, slept, killed.reply()]).toEqual([[[4242, "SIGTERM"], [-4242, "SIGKILL"]], STOP_KILL_AFTER_MS, { ok: true, protocol: 1, result: "killed" }]);
+    sent.length = 0; slept = 0;
+    const quick = host({ instanceId: "inst-r1", handle: "4242", mode: "immediate" }, { ...base, sleep: async (ms) => { slept += ms; if (slept >= 750) alive = false; } });
+    await runOsHost(["stop"], {}, quick.deps);
+    expect([sent, slept, quick.reply().result]).toEqual([[[4242, "SIGTERM"]], 750, "stopped"]);
+    const none = host({ instanceId: "inst-r1", handle: "4242", mode: "graceful" }, base);
+    await runOsHost(["stop"], {}, none.deps);
+    expect(none.reply().result).toBe("not_running");
+  });
+
+  it("answers resources with the local launcher's own snapshot of this machine", async () => {
+    const h = host({ host: "host-a" }, { psAll: async () => "/usr/local/bin/claude\nnode /path/to/lib/node_modules/@anthropic-ai/claude-code/cli.js\n/bin/zsh\n" });
+    expect(await runOsHost(["resources"], {}, h.deps)).toBe(0);
+    const { snapshot } = h.reply();
+    expect(snapshot).toMatchObject({ host: "host-a", claudeSessions: 2, instancesRunning: 0, portsInUse: [], tokensThisHour: {} });
+    expect(snapshot.cpus).toBeGreaterThan(0);
+    expect(snapshot.memTotalMb).toBeGreaterThanOrEqual(snapshot.memFreeMb);
+  });
+
+  it("checks the toolchain a run needs, with the PATH the run gets, and never prints a token", async () => {
+    const p = await project();
+    await writeFile(join(p.swarmPath, "config.json"), JSON.stringify({ source_control: { github_account: "owner-a" } }));
+    const calls: string[] = [];
+    const answers: Record<string, ExecResult> = {
+      "node --version": { code: 0, stdout: "v26.1.0\n", stderr: "" },
+      "docker --version": { code: 0, stdout: "Docker version 28.0.1\n", stderr: "" },
+      "docker info --format {{.ServerVersion}}": { code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" },
+      "claude --version": { code: 0, stdout: "2.1.0 (Claude Code)\n", stderr: "" },
+      "claude auth status": { code: 1, stdout: "", stderr: "error: unknown command 'auth'" },
+      "gh --version": { code: 0, stdout: "gh version 2.70.0\n", stderr: "" },
+      [`git -C ${p.cwd} rev-parse --is-inside-work-tree`]: { code: 0, stdout: "true\n", stderr: "" },
+      "gh auth token --user owner-a": { code: 0, stdout: "gho_secret_x\n", stderr: "" },
+    };
+    const exec: HostExec = async (file, args, opts) => {
+      const key = [file, ...args].join(" ");
+      calls.push(key);
+      expect(opts?.env?.PATH).toBe("/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin");
+      return answers[key] ?? { code: 127, stdout: "", stderr: "not found" };
+    };
+    const h = host({ paths: [p.swarmPath] }, { exec, platform: "darwin", version: "1.0.0-alpha.7", env: { PATH: "/usr/bin:/bin", HOME: "/path/to/home" } });
+    expect(await runOsHost(["check"], {}, h.deps)).toBe(0);
+    const reply = h.reply();
+    expect(reply).toMatchObject({ ok: true, protocol: 1, version: "1.0.0-alpha.7", platform: "darwin" });
+    expect(reply.items.map((i: { name: string; status: string }) => [i.name, i.status])).toEqual([
+      ["swarm", "ok"], ["node", "missing"], ["docker", "ok"], ["docker_daemon", "missing"], ["claude", "ok"], ["claude_login", "unknown"], ["gh", "ok"],
+      [`path:${p.swarmPath}`, "ok"], [`repo:${p.swarmPath}`, "ok"], [`github:${p.swarmPath}`, "ok"],
+    ]);
+    expect(reply.items.find((i: { name: string }) => i.name === "docker_daemon").fix).toContain("postgres_url without compose_file");
+    expect(calls).toEqual(Object.keys(answers));
+    expect(JSON.stringify(reply)).not.toContain("gho_secret_x");
+  });
+
+  it("reports whether a path exists and is a swarm directory", async () => {
+    const p = await project();
+    const ask = async (path: string) => { const h = host({ path }); await runOsHost(["path"], {}, h.deps); return h.reply(); };
+    expect(await ask(p.swarmPath)).toEqual({ ok: true, protocol: 1, exists: true, directory: true, swarmDir: true, realPath: p.swarmPath });
+    expect(await ask(join(p.dir, "missing"))).toEqual({ ok: true, protocol: 1, exists: false, directory: false, swarmDir: false, realPath: null });
+  });
+
+  it("runs the real swarm in production: the run command is a test seam only", () => {
+    expect(defaultRunCommand()).toEqual(swarmSelfCommand());
+    expect(hostRunArgv(HostStartRequestSchema.parse(startRequest({ cwd: "/path/to/project-a", swarmPath: "/path/to/project-a/.swarm" }, { fresh: true }))).at(-1)).toBe("--fresh");
+    expect(hostPath("/usr/bin:/bin", "darwin", "/path/to/swarm-bin")).toBe("/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/path/to/swarm-bin");
+    expect(hostPath("/usr/local/bin:/usr/bin:/usr/local/bin", "linux", null)).toBe("/usr/local/bin:/usr/bin");
+  });
+});
+```
+
+In the `check` test, the project's `cwd` has no `.git`; `repo:` is decided by the stubbed `git` answer alone.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd packages/os && npx vitest run tests/launcher/host-protocol.test.ts`
+Expected: FAIL — cannot load `../../src/launcher/host-protocol.js`.
+Run: `cd packages/cli && npx vitest run tests/os-host.test.ts`
+Expected: FAIL — cannot load `../src/cli/os-host.js`.
+
+- [ ] **Step 3: Implement**
+
+1. `host-protocol.ts` and `host-inspect.ts` to the signatures above. `parseHostReply` walks the stdout lines from the last, `JSON.parse`s each that starts with `{`, and returns the first that the op's reply schema accepts.
+2. In `local.ts`, move the body of `LocalLauncher.resources()` into `machineSnapshot(host, ps, usage, now)`; `resources()` returns `machineSnapshot(this.host, this.ps, this.usage)`. Task 11's tests pass unchanged.
+3. Append to the `// plan 04` block of `src/index.ts`: everything `host-protocol.ts` exports, `inspectPath`, `machineSnapshot`, `INHERITED_ENV`, `countClaudeProcesses`. Build the package (`pnpm --filter @mnmal-ai/swarm-os build`), since the CLI reads it from `dist`.
+4. `packages/cli/src/cli/os-host.ts` to the rules above. It imports only from `@mnmal-ai/swarm-os`, node builtins, `./codex-hook.js` and `../version.js`, and never `console.log`s.
+
+- [ ] **Step 4: Run the tests, the package gate and the CLI suite**
+
+Run: `cd packages/os && npx vitest run tests/launcher/host-protocol.test.ts tests/launcher/local.test.ts`
+Expected: PASS (3 tests, and Task 11's 5).
+Run: `pnpm --filter @mnmal-ai/swarm-os build && cd packages/cli && npx vitest run tests/os-host.test.ts`
+Expected: PASS (8 tests). Then the package gate, and `cd packages/cli && npx vitest run` (the CLI suite stays green).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/launcher/host-protocol.ts packages/os/src/launcher/host-inspect.ts packages/os/src/launcher/local.ts packages/os/src/index.ts \
+  packages/os/tests/launcher/host-protocol.test.ts packages/cli/src/cli/os-host.ts packages/cli/tests/os-host.test.ts
+git -c commit.gpgsign=false commit -m "feat(os): host protocol and the swarm os host helper that starts, watches and stops a run on a remote machine"
+```
+
+---
+
+### Task 17: `RemoteLauncher` over the system `ssh`, with a host provider
+
+**Files:**
+- Create: `packages/os/src/launcher/host-provider.ts`, `packages/os/src/launcher/remote.ts`
+- Modify: `packages/os/src/launcher/launcher.ts` (`status` may answer `"unreachable"`; `ReleaseOutcome`; the optional `release`; `HOST_ENV_ALLOWLIST`, `allowedSpecEnv`), `packages/os/src/index.ts` (the `// plan 04` block)
+- Modify: `packages/os/tests/dispatch/fixtures.ts` (add `hostConfig`)
+- Create: `packages/os/tests/launcher/__fixtures__/fake-ssh.mjs`, `packages/os/tests/launcher/__fixtures__/fake-host.mjs`, `packages/os/tests/launcher/ssh-rig.ts`
+- Create: `packages/cli/tests/__fixtures__/os-host-shim.ts`
+- Test: `packages/os/tests/launcher/remote.test.ts`, `packages/cli/tests/os-remote-launch.test.ts`
+
+**Interfaces:**
+- Consumes: Task 16's protocol (`HOST_PROTOCOL`, `HostOp`, `HostRequests`, `HostReplies`, `HOST_REPLY_SCHEMAS`, `parseHostReply`, `PathReport`) and helper; Task 4's `Launcher`, `InstanceSpec`, `LauncherHandle`, `ResourceSnapshot`, `UsageSource`, `LaunchError`; Task 11's `INHERITED_ENV`; `redactSecrets` (plan 02, package root); `OsConfig["launcher"]` (plan 03, ruling C28).
+- Produces:
+
+```ts
+// packages/os/src/launcher/launcher.ts (additions)
+export interface Launcher {
+  /* Task 4's members, with */ status(handle: LauncherHandle): Promise<"running" | "gone" | "unreachable">;   // "unreachable": the host did not answer; keep the instance and recheck
+  release?(handle: LauncherHandle, outcome: ReleaseOutcome): Promise<void>;   // the instance ended; a launcher that acquired a machine for it gives it back
+}
+export type ReleaseOutcome = "exited" | "stopped" | "failed";
+export const HOST_ENV_ALLOWLIST: readonly ["SWARM_OS_TOKEN", "SWARM_OS_INSTANCE_ID", "SWARM_OS_CONTEXT"];
+export function allowedSpecEnv(spec: InstanceSpec): Record<string, string>;   // spec.env limited to HOST_ENV_ALLOWLIST, then SWARM_OS_TOKEN: spec.token and SWARM_OS_INSTANCE_ID: spec.instanceId set last
+
+// packages/os/src/launcher/host-provider.ts
+export interface AcquiredHost { name: string; ssh: string; swarm: string; ephemeral: boolean }   // name goes into LauncherHandle.host
+export interface HostProvider {
+  kind: string;
+  acquire(spec: InstanceSpec): Promise<AcquiredHost>;                       // a machine for this instance; a rejection is an unreachable host
+  release(host: AcquiredHost, outcome: ReleaseOutcome): Promise<void>;      // called at most once per instance per brain process; must itself be idempotent
+  extraEnv?(spec: InstanceSpec): Promise<Record<string, string>>;           // keys this provider adds for its own machines (a login for a machine with none); never overrides the allowlist's three
+  locate?(name: string): AcquiredHost | null;                               // a host handed out earlier, for status and stop after the brain restarts
+}
+export class StaticHostProvider implements HostProvider {
+  readonly kind: "static";
+  constructor(config: Pick<OsConfig, "launcher">);                          // reads config.launcher.hosts at each call, so SIGHUP edits apply
+}   // acquire: the entry named spec.registration.host, ephemeral false, else rejects "host <h> is not in os.json launcher.hosts"; release: nothing; locate: the entry of that name or null; no extraEnv
+
+// packages/os/src/launcher/remote.ts
+export const SSH_OPTIONS: readonly ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2"];
+export const SSH_TIMEOUT_MS: Readonly<Record<HostOp, number>>;             // start 60_000, status 20_000, stop 30_000, resources 20_000, check 60_000, path 20_000
+export class HostUnreachableError extends LaunchError { readonly host: string; readonly detail: string; constructor(host: string, detail: string) }   // name "HostUnreachableError"; message `<host> did not answer: <detail>`
+export class HostCommandError extends LaunchError { readonly host: string; readonly code: string; constructor(host: string, code: string, message: string) }   // name "HostCommandError": the host answered with an error
+export interface InstanceInfo { swarmPath: string; cardId: string }
+export interface RemoteLauncherOptions {
+  provider: HostProvider;
+  ssh?: string;                                                             // default "ssh" from PATH
+  env?: NodeJS.ProcessEnv;                                                  // ssh's own environment; default sshEnv(process.env)
+  usage?: (host: string) => UsageSource;                                    // the brain's own count for one host; default none
+  instanceInfo?: (instanceId: string) => Promise<InstanceInfo | null>;      // lets status and stop find a run whose handle was never recorded
+  timeoutsMs?: Partial<Record<HostOp, number>>;
+  log?: Logger;
+}
+export class RemoteLauncher implements Launcher {
+  readonly kind: "remote";
+  constructor(opts: RemoteLauncherOptions);
+  start(spec: InstanceSpec): Promise<LauncherHandle>;                       // { instanceId, host: acquired.name, handle: <pid on that host> }
+  status(handle: LauncherHandle): Promise<"running" | "gone" | "unreachable">;
+  stop(handle: LauncherHandle, mode: "graceful" | "immediate"): Promise<void>;
+  release(handle: LauncherHandle, outcome: ReleaseOutcome): Promise<void>;
+  resources(): Promise<ResourceSnapshot>;                                   // always rejects: a remote launcher has many hosts; use resourcesOn(host)
+  resourcesOn(host: string): Promise<ResourceSnapshot>;
+  pathOn(host: string, path: string): Promise<PathReport>;
+  checkOn(host: string, paths: string[]): Promise<HostReplies["check"]>;
+}
+export function sshArgv(host: AcquiredHost, op: HostOp): string[];          // [...SSH_OPTIONS, host.ssh, "--", host.swarm, "os", "host", op]
+export function sshEnv(parent: NodeJS.ProcessEnv): Record<string, string>;  // the INHERITED_ENV keys parent has, nothing else
+
+// packages/os/tests/dispatch/fixtures.ts (addition)
+export function hostConfig(hosts: Array<{ name: string; ssh: string; swarm?: string; platform?: "darwin" | "linux" }>, limits?: Partial<OsConfig["limits"]>): OsConfig;   // testConfig with launcher_hosts ["local", ...names] (limits override), launcher { local: true, hosts } with swarm defaulting to "swarm"
+
+// packages/os/tests/launcher/ssh-rig.ts
+export interface SshRig { dir: string; home: string; ssh: string; swarm: string; env: NodeJS.ProcessEnv;
+  reply(op: string, reply: unknown): Promise<void>;                         // rewrites the scripted reply for op
+  requests(): Promise<Array<{ argv: string[]; home: string; request: unknown }>>;   // what the fake host received, in order
+  sshCalls(): Promise<string[][]>; }                                        // the argv of each fake ssh call, in order ([] before any)
+export function sshRig(replies?: Record<string, unknown>): Promise<SshRig>;
+```
+
+**`RemoteLauncher` rules.**
+- One call (`call(host, op, request)`, private) is `spawn(ssh, sshArgv(host, op), { env, stdio: ["pipe", "pipe", "pipe"] })`, writing `JSON.stringify(request) + "\n"` to stdin and closing it, reading stdout and stderr (each capped at 1 MiB), and killing ssh with `SIGKILL` after `timeoutsMs[op] ?? SSH_TIMEOUT_MS[op]`. Then: a timeout → `HostUnreachableError(host.name, "no answer in <n> s")`; spawn failing (no ssh binary) → `HostUnreachableError(host.name, "ssh: <message>")`; exit 255 → `HostUnreachableError(host.name, <the last non-empty stderr line, through redactSecrets, at most 200 characters>)`; `parseHostReply(op, stdout)` null → `HostUnreachableError(host.name, "unreadable reply (exit <code>): <the last stdout or stderr line, redacted, at most 200 characters>")`. These are the overview's "exit 255, a timeout or an unparseable reply is unreachable". A parsed reply whose `protocol` is not `HOST_PROTOCOL` → `HostCommandError(host.name, "protocol", "<host> speaks host protocol <n>; this brain speaks 1: run the same swarm version on both")`; `ok: false` → `HostCommandError(host.name, error.code, error.message)`; else the reply.
+- Before any spawn, a destination that starts with `-` (it would be read as an ssh option) rejects with `LaunchError('ssh destination "<ssh>" starts with "-"; os.json launcher.hosts[].ssh must be a host or user@host')`. `swarm` is passed as one argv word; ssh joins the remote words with spaces and the remote shell splits them, so `launcher.hosts[].swarm` must be a path without spaces.
+- `start(spec)`: `acquired = await provider.acquire(spec)`, a rejection becoming `HostUnreachableError(spec.registration.host, "acquire failed: <message>")`. `env = { ...await provider.extraEnv?.(spec), ...allowedSpecEnv(spec) }`, so a key outside the allowlist that the provider did not add is dropped, and a provider cannot override the three. The request is `{ instanceId, workspace: { kind: "existing", cwd: dirname(registration.swarmPath), swarmPath: registration.swarmPath }, cardId, brainUrl: spec.brainUrl, env, fresh: spec.fresh ?? false }`. On success remember `acquired` by instance id and resolve `{ instanceId, host: acquired.name, handle: reply.handle }`. On any failure after `acquire`: `provider.release(acquired, "failed")` (errors logged) and rethrow; that is the instance's one release, so a later `release` for it (the module's, when the failed row is published) does nothing.
+- Finding the host of a handle: the remembered one, else `provider.locate?.(handle.host)`, else none. `status` with none → `"unreachable"` (logged once per instance); `stop` with none → `HostUnreachableError(handle.host, "no such host in os.json launcher.hosts")`; `release` with none → nothing.
+- `status` and `stop` send `{ instanceId, handle: handle.handle, ...await instanceInfo?.(instanceId) }` (`swarmPath`, `cardId`; plus `mode` for `stop`), so a run whose handle the brain never recorded is found by its record. `status` answers `"unreachable"` for a `HostUnreachableError` and rethrows a `HostCommandError`.
+- `release(handle, outcome)`: once per instance id per process (a second call is a no-op); `provider.release(host, outcome)`; forget the instance.
+- `resourcesOn(host)`: `{ ...reply.snapshot, host, ...(await usage?.(host).usage()) }`: the host's machine numbers with the brain's own count of that host's instances, ports and tokens. `pathOn` and `checkOn` return the reply without `ok` and `protocol`.
+
+**The fake ssh** (`fake-ssh.mjs`): skips `-T` and every `-o <value>` pair, takes the next word as the destination, drops a `--`, and appends `{ argv }` (its own argv) to `$FAKE_SSH_LOG` when set. Destination `down-host` prints `ssh: connect to host down-host port 22: Operation timed out` to stderr and exits 255; `hang-host` never answers. Any other destination runs `/bin/sh -c "<remaining words joined by spaces>"` with stdio inherited and the environment `{ PATH, HOME: $FAKE_SSH_HOME }` only (sshd forwards nothing of the client's environment), and exits with its code. **The fake host** (`fake-host.mjs`, standing in for `swarm` on a host in this package's tests): reads stdin, appends `{ argv, home: $HOME, request }` to `$HOME/requests.jsonl`, and answers from `$HOME/replies.json` (`{ [op]: reply }`): a reply with `raw` prints that text and exits `exit ?? 1`; any other prints its JSON and exits 0 when `ok` is true, else 1; an op with no reply answers `{ ok: false, protocol: 1, error: { code: "internal", message: "no reply scripted" } }`. `sshRig(replies)` makes a `mkdtemp` directory with `home/replies.json`, an executable `ssh` and `swarm` (each a two-line `#!/bin/sh` script that `exec`s `process.execPath` on the fixture with `"$@"`), and `env = { PATH, FAKE_SSH_HOME: home, FAKE_SSH_LOG: <dir>/ssh.jsonl }`.
+
+- [ ] **Step 1: Write the fixtures and the failing tests**
+
+```ts
+// packages/os/tests/launcher/remote.test.ts
+import { describe, it, expect } from "vitest";
+import { RemoteLauncher, HostUnreachableError, sshEnv, type RemoteLauncherOptions } from "../../src/launcher/remote.js";
+import { StaticHostProvider, type HostProvider } from "../../src/launcher/host-provider.js";
+import { sshRig, type SshRig } from "./ssh-rig.js";
+import { registrationRow } from "../dispatch/fixtures.js";
+
+const SPEC = { instanceId: "inst-r1", registration: registrationRow({ host: "host-a" }), cardId: "card-1", token: "inst_secret_r1", brainUrl: "https://os.example", env: { SWARM_OS_CONTEXT: "Use staging", EVIL: "1" } };
+const remoteFor = (rig: SshRig, hosts: Array<{ name: string; ssh: string }> = [{ name: "host-a", ssh: "owner@mac-a" }], over: Partial<RemoteLauncherOptions> = {}) =>
+  new RemoteLauncher({ provider: new StaticHostProvider({ launcher: { local: true, hosts: hosts.map((h) => ({ swarm: rig.swarm, ...h })) } }), ssh: rig.ssh, env: rig.env, ...over });
+const SNAP = { host: "host-a", at: "2026-10-25T09:00:00.000Z", cpuLoad1: 0.5, cpus: 8, memFreeMb: 4096, memTotalMb: 16384, instancesRunning: 0, claudeSessions: 2, portsInUse: [], tokensThisHour: {} };
+
+describe("RemoteLauncher", () => {
+  it("starts a run over the system ssh with the exact invocation, the token only on the session's input", async () => {
+    const rig = await sshRig({ start: { ok: true, protocol: 1, handle: "4242", reused: false } });
+    expect(await remoteFor(rig).start(SPEC)).toEqual({ instanceId: "inst-r1", host: "host-a", handle: "4242" });
+    expect(await rig.sshCalls()).toEqual([["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2", "owner@mac-a", "--", rig.swarm, "os", "host", "start"]]);
+    expect(await rig.requests()).toEqual([{ argv: ["os", "host", "start"], home: rig.home, request: {
+      instanceId: "inst-r1", workspace: { kind: "existing", cwd: "/path/to/project-a", swarmPath: "/path/to/project-a/.swarm" }, cardId: "card-1", brainUrl: "https://os.example",
+      env: { SWARM_OS_CONTEXT: "Use staging", SWARM_OS_INSTANCE_ID: "inst-r1", SWARM_OS_TOKEN: "inst_secret_r1" }, fresh: false } }]);
+    expect(JSON.stringify(await rig.sshCalls())).not.toContain("inst_secret_r1");
+    expect(sshEnv({ PATH: "/usr/bin", HOME: "/path/to/home", SSH_AUTH_SOCK: "/path/to/agent.sock", SWARM_OS_TOKEN: "inst_x", ANTHROPIC_API_KEY: "sk-ant-x" }))
+      .toEqual({ PATH: "/usr/bin", HOME: "/path/to/home", SSH_AUTH_SOCK: "/path/to/agent.sock" });
+  });
+
+  it("asks the provider for a machine once per start, adds its keys, and releases once per end with the outcome", async () => {
+    const rig = await sshRig({ start: { ok: true, protocol: 1, handle: "4242", reused: false } });
+    const calls: string[] = [];
+    const provider: HostProvider = {
+      kind: "test",
+      acquire: async (spec) => { calls.push(`acquire ${spec.instanceId}`); return { name: "vm-1", ssh: "owner@mac-a", swarm: rig.swarm, ephemeral: true }; },
+      release: async (host, outcome) => { calls.push(`release ${host.name} ${outcome}`); },
+      extraEnv: async () => ({ PROVIDER_LOGIN: "login-1", SWARM_OS_TOKEN: "spoofed" }),
+    };
+    const remote = new RemoteLauncher({ provider, ssh: rig.ssh, env: rig.env });
+    const h = await remote.start(SPEC);
+    expect(h).toEqual({ instanceId: "inst-r1", host: "vm-1", handle: "4242" });
+    expect((await rig.requests())[0].request).toMatchObject({ env: { PROVIDER_LOGIN: "login-1", SWARM_OS_TOKEN: "inst_secret_r1" } });
+    await remote.release(h, "stopped");
+    await remote.release(h, "stopped");
+    await rig.reply("start", { ok: false, protocol: 1, error: { code: "not_swarm_dir", message: "/path/to/project-a/.swarm is not a swarm directory (no swarm.json)" } });
+    await expect(remote.start({ ...SPEC, instanceId: "inst-r2" })).rejects.toMatchObject({ name: "HostCommandError", code: "not_swarm_dir" });
+    expect(calls).toEqual(["acquire inst-r1", "release vm-1 stopped", "acquire inst-r2", "release vm-1 failed"]);
+  });
+
+  it("calls a host unreachable on exit 255, a timeout, an unreadable reply, an unknown host or a provider with no machine", async () => {
+    const rig = await sshRig({ status: { raw: "zsh: command not found: swarm", exit: 127 } });
+    const remote = remoteFor(rig, [{ name: "host-a", ssh: "owner@mac-a" }, { name: "host-d", ssh: "down-host" }, { name: "host-h", ssh: "hang-host" }], { timeoutsMs: { status: 300 } });
+    const handle = (host: string) => ({ instanceId: "inst-r1", host, handle: "4242" });
+    expect([await remote.status(handle("host-d")), await remote.status(handle("host-h")), await remote.status(handle("host-a")), await remote.status(handle("host-x"))])
+      .toEqual(["unreachable", "unreachable", "unreachable", "unreachable"]);
+    const err = await remote.start({ ...SPEC, registration: registrationRow({ host: "host-d" }) }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HostUnreachableError);
+    expect(err).toMatchObject({ host: "host-d", detail: expect.stringContaining("Operation timed out") });
+    const empty: HostProvider = { kind: "test", acquire: async () => { throw new Error("no machine available"); }, release: async () => {} };
+    expect(await new RemoteLauncher({ provider: empty, ssh: "/path/to/missing-ssh" }).start(SPEC).catch((e: unknown) => e))
+      .toMatchObject({ name: "HostUnreachableError", host: "host-a", detail: "acquire failed: no machine available" });
+  }, 10_000);
+
+  it("passes on a host's own error, refuses another protocol version, and never reads a destination as an option", async () => {
+    const rig = await sshRig({ status: { ok: false, protocol: 1, error: { code: "internal", message: "ps failed" } }, stop: { ok: true, protocol: 2, result: "signalled" } });
+    const remote = remoteFor(rig, [{ name: "host-a", ssh: "owner@mac-a" }, { name: "host-o", ssh: "-oProxyCommand=sh" }]);
+    await expect(remote.status({ instanceId: "inst-r1", host: "host-a", handle: "4242" })).rejects.toMatchObject({ name: "HostCommandError", code: "internal" });
+    await expect(remote.stop({ instanceId: "inst-r1", host: "host-a", handle: "4242" }, "graceful")).rejects.toMatchObject({ name: "HostCommandError", code: "protocol" });
+    const before = (await rig.sshCalls()).length;
+    await expect(remote.start({ ...SPEC, registration: registrationRow({ host: "host-o" }) })).rejects.toThrow('ssh destination "-oProxyCommand=sh" starts with "-"');
+    expect((await rig.sshCalls()).length).toBe(before);
+  });
+
+  it("finds a run by instance id when its handle is empty, and fills a host's snapshot with the brain's own usage", async () => {
+    const rig = await sshRig({ status: { ok: true, protocol: 1, status: "running" }, stop: { ok: true, protocol: 1, result: "killed" }, resources: { ok: true, protocol: 1, snapshot: SNAP } });
+    const remote = remoteFor(rig, undefined, {
+      instanceInfo: async (id) => (id === "inst-r1" ? { swarmPath: "/path/to/project-a/.swarm", cardId: "card-1" } : null),
+      usage: (host) => ({ usage: async () => ({ instancesRunning: host === "host-a" ? 1 : 0, portsInUse: [3141], tokensThisHour: { "project-a": 700 } }) }),
+    });
+    expect(await remote.status({ instanceId: "inst-r1", host: "host-a", handle: "" })).toBe("running");
+    await remote.stop({ instanceId: "inst-r1", host: "host-a", handle: "" }, "immediate");
+    expect(await remote.resourcesOn("host-a")).toEqual({ ...SNAP, instancesRunning: 1, portsInUse: [3141], tokensThisHour: { "project-a": 700 } });
+    expect((await rig.requests()).map((r) => r.request)).toEqual([
+      { instanceId: "inst-r1", handle: "", swarmPath: "/path/to/project-a/.swarm", cardId: "card-1" },
+      { instanceId: "inst-r1", handle: "", swarmPath: "/path/to/project-a/.swarm", cardId: "card-1", mode: "immediate" },
+      { host: "host-a" },
+    ]);
+    await expect(remote.resources()).rejects.toThrow("resourcesOn(host)");
+  });
+
+  it("asks a host about a path and about its toolchain", async () => {
+    const report = { exists: true, directory: true, swarmDir: true, realPath: "/path/to/project-a/.swarm" };
+    const rig = await sshRig({ path: { ok: true, protocol: 1, ...report }, check: { ok: true, protocol: 1, version: "1.0.0-alpha.7", platform: "darwin", items: [{ name: "swarm", status: "ok", detail: "1.0.0-alpha.7 (host protocol 1)", fix: null }] } });
+    const remote = remoteFor(rig);
+    expect(await remote.pathOn("host-a", "/path/to/project-a/.swarm")).toEqual(report);
+    expect(await remote.checkOn("host-a", ["/path/to/project-a/.swarm"])).toEqual({ version: "1.0.0-alpha.7", platform: "darwin", items: [{ name: "swarm", status: "ok", detail: "1.0.0-alpha.7 (host protocol 1)", fix: null }] });
+    expect((await rig.requests()).map((r) => r.request)).toEqual([{ path: "/path/to/project-a/.swarm" }, { paths: ["/path/to/project-a/.swarm"] }]);
+  });
+});
+```
+
+```ts
+// packages/cli/tests/__fixtures__/os-host-shim.ts: stands in for `swarm` on a host in tests: the real helper, with Task 11's fake-run.mjs as `swarm run`
+import { fileURLToPath } from "node:url";
+import { runOsHost } from "../../src/cli/os-host.js";
+
+const FAKE_RUN = fileURLToPath(new URL("../../../os/tests/launcher/__fixtures__/fake-run.mjs", import.meta.url));
+const [os, host, ...args] = process.argv.slice(2);
+if (os !== "os" || host !== "host") process.exit(2);
+process.exit(await runOsHost(args, {}, { runCommand: [process.execPath, FAKE_RUN], keepAwake: () => {} }));
+```
+
+```ts
+// packages/cli/tests/os-remote-launch.test.ts
+import { describe, it, expect } from "vitest";
+import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { RemoteLauncher, StaticHostProvider } from "@mnmal-ai/swarm-os";
+
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const REPO = resolve(HERE, "../../..");
+const TSX = join(REPO, "node_modules", ".bin", "tsx");
+const SHIM = join(HERE, "__fixtures__", "os-host-shim.ts");
+const FAKE_SSH = join(REPO, "packages", "os", "tests", "launcher", "__fixtures__", "fake-ssh.mjs");
+async function lineIn(file: string, re: RegExp): Promise<string> {
+  for (let i = 0; i < 500; i++) {
+    const hit = (existsSync(file) ? await readFile(file, "utf8") : "").split("\n").find((l) => re.test(l));
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`no line matching ${re} in ${file}`);
+}
+
+describe.skipIf(/\s/.test(REPO))("a run on another machine, end to end", () => {
+  it("starts, watches and stops a card's run through ssh and the real helper, with the token never on a command line", async () => {
+    const dir = realpathSync(await mkdtemp(join(tmpdir(), "swarm-os-e2e-")));
+    const swarmPath = join(dir, "project-a", ".swarm");
+    await mkdir(swarmPath, { recursive: true });
+    await writeFile(join(swarmPath, "swarm.json"), "{}");
+    await mkdir(join(dir, "home"));
+    const ssh = join(dir, "ssh");
+    await writeFile(ssh, `#!/bin/sh\nexec "${process.execPath}" "${FAKE_SSH}" "$@"\n`, { mode: 0o755 });
+    const sshLog = join(dir, "ssh.jsonl");
+    const remote = new RemoteLauncher({
+      provider: new StaticHostProvider({ launcher: { local: true, hosts: [{ name: "host-a", ssh: "owner@mac-a", swarm: `${TSX} ${SHIM}` }] } }),
+      ssh, env: { PATH: process.env.PATH, FAKE_SSH_HOME: join(dir, "home"), FAKE_SSH_LOG: sshLog },
+      instanceInfo: async () => ({ swarmPath, cardId: "card-1" }),
+    });
+    const registration = { host: "host-a", swarmPath } as Parameters<RemoteLauncher["start"]>[0]["registration"];
+    const handle = await remote.start({ instanceId: "inst-e1", registration, cardId: "card-1", token: "inst_secret_e1", brainUrl: "https://os.example" });
+    expect(handle).toEqual({ instanceId: "inst-e1", host: "host-a", handle: expect.stringMatching(/^\d+$/) });
+    const log = join(swarmPath, "logs", "os-inst-e1.log");
+    const first = JSON.parse(await lineIn(log, /^\{/)) as { argv: string[]; env: string[] };
+    expect(first.argv).toEqual(["run", "--card", "card-1", "--yes", "--no-tree", "--swarm-path", swarmPath, "--os", "https://os.example"]);
+    expect(first.env).toEqual(expect.arrayContaining(["SWARM_OS_TOKEN", "SWARM_OS_INSTANCE_ID"]));
+    expect(await readFile(sshLog, "utf8")).not.toContain("inst_secret_e1");
+    expect(await remote.status(handle)).toBe("running");
+    expect(await remote.status({ ...handle, handle: "" })).toBe("running");
+    await remote.stop(handle, "graceful");
+    await lineIn(log, /^SIGINT 1$/);
+    await remote.stop(handle, "immediate");
+    expect(await remote.status(handle)).toBe("gone");
+    expect((await remote.resourcesOn("host-a")).host).toBe("host-a");
+  }, 60_000);
+});
+```
+
+The cast in the end-to-end test is the one place a partial `RegistrationRow` is used: the launcher reads only `host` and `swarmPath`.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd packages/os && npx vitest run tests/launcher/remote.test.ts`
+Expected: FAIL — cannot load `../../src/launcher/remote.js`.
+Run: `pnpm --filter @mnmal-ai/swarm-os build && cd packages/cli && npx vitest run tests/os-remote-launch.test.ts`
+Expected: FAIL — `RemoteLauncher is not a constructor` (not exported yet).
+
+- [ ] **Step 3: Implement**
+
+1. `launcher.ts`: widen `status`, add `ReleaseOutcome`, the optional `release`, `HOST_ENV_ALLOWLIST` and `allowedSpecEnv`. `FakeLauncher.status`'s type follows (Task 18 lets it answer `"unreachable"`).
+2. `host-provider.ts` and `remote.ts` to the rules above. Logging through `createLogger("remote-launcher")`; no log line carries a request or a reply body.
+3. The fixtures, `ssh-rig.ts` and `hostConfig`.
+4. Append `RemoteLauncher`, `HostUnreachableError`, `HostCommandError`, `StaticHostProvider`, `sshArgv`, `sshEnv`, `SSH_OPTIONS`, `HOST_ENV_ALLOWLIST`, `allowedSpecEnv` and the types `HostProvider`, `AcquiredHost`, `ReleaseOutcome`, `RemoteLauncherOptions`, `InstanceInfo` to the `// plan 04` block of `src/index.ts`.
+
+- [ ] **Step 4: Run the tests, the package gate and the CLI test**
+
+Run: `cd packages/os && npx vitest run tests/launcher`
+Expected: PASS (`remote.test.ts`'s 6 tests and the earlier launcher tests). Then the package gate.
+Run: `pnpm --filter @mnmal-ai/swarm-os build && cd packages/cli && npx vitest run tests/os-remote-launch.test.ts tests/os-host.test.ts`
+Expected: PASS (1 and 8 tests; the end-to-end test takes a few seconds, since every op starts the helper under `tsx`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/launcher packages/os/src/index.ts packages/os/tests/launcher packages/os/tests/dispatch/fixtures.ts \
+  packages/cli/tests/__fixtures__/os-host-shim.ts packages/cli/tests/os-remote-launch.test.ts
+git -c commit.gpgsign=false commit -m "feat(os): remote launcher over the system ssh with a host provider seam"
+```
+
+---
+
+### Task 18: `LauncherRouter`, the token by environment only, and the brain on the router
+
+**Files:**
+- Create: `packages/os/src/launcher/router.ts`
+- Modify: `packages/os/src/launcher/launcher.ts` (`kind` gains `"router"`; `releaseOutcome`; `meteredLauncher` keeps a launcher's other methods), `packages/os/src/launcher/local.ts` (no token in argv; `checkPath`), `packages/os/src/launcher/fake.ts`
+- Modify: `packages/os/src/dispatch/checks.ts` (the `resources` check's host rules), `packages/os/src/dispatch/dispatcher.ts`, `packages/os/src/dispatch/instances.ts` (`RunControl`), `packages/os/src/dispatch/mount.ts`, `packages/os/src/dispatch/brain-module.ts`, `packages/os/src/index.ts`
+- Modify: `packages/os/tests/launcher/local.test.ts` (Task 11's expectations), `packages/os/tests/dispatch/harness.ts` (the `remote` option)
+- Test: `packages/os/tests/launcher/router.test.ts`, `packages/os/tests/dispatch/remote-dispatch.test.ts`
+
+**Interfaces:**
+- Consumes: Task 17's `RemoteLauncher`, `StaticHostProvider`, `HostProvider`, `HostUnreachableError`, `allowedSpecEnv`, `ReleaseOutcome`, `hostConfig`; Task 16's `PathReport`, `NO_PATH`, `HostReplies`, `inspectPath`; Task 15's `meteredLauncher`; plan 03's C30 (reconcile keeps an `"unreachable"` instance) and `BRAIN_RESTART_FOUND_GONE`.
+- Produces:
+
+```ts
+// packages/os/src/launcher/launcher.ts (changes)
+export interface Launcher { kind: "local" | "remote" | "fake" | "router"; /* … */ }
+export function releaseOutcome(row: InstanceRow): ReleaseOutcome;   // exited with exitReason "stopped" → "stopped"; any other exited, or paused → "exited"; failed or login_expired → "failed"
+export function meteredLauncher<L extends Launcher>(launcher: L, metrics: Metrics): L;   // Task 15's timing of start, status, stop and resources; every other method (release, resourcesOn, pathOn, checkOn, checkPath, onChildExit) is kept, bound to the launcher, untimed
+
+// packages/os/src/launcher/router.ts
+export interface RemoteOps { resourcesOn(host: string): Promise<ResourceSnapshot>; pathOn(host: string, path: string): Promise<PathReport>; checkOn?(host: string, paths: string[]): Promise<HostReplies["check"]> }
+export interface LocalOps { checkPath?(path: string): Promise<PathReport> }
+export class LauncherRouter implements Launcher {
+  readonly kind: "router";
+  readonly local: Launcher & LocalOps;
+  readonly remote: (Launcher & RemoteOps) | null;
+  constructor(deps: { config: OsConfig; local: Launcher & LocalOps; remote: (Launcher & RemoteOps) | null; log: Logger });
+  start(spec: InstanceSpec): Promise<LauncherHandle>;
+  status(handle: LauncherHandle): Promise<"running" | "gone" | "unreachable">;
+  stop(handle: LauncherHandle, mode: "graceful" | "immediate"): Promise<void>;
+  release(handle: LauncherHandle, outcome: ReleaseOutcome): Promise<void>;
+  resources(): Promise<ResourceSnapshot>;                          // the brain's own machine
+  probe(host: string): Promise<ResourceSnapshot>;                  // a remote host's snapshot (Task 19's HostMonitor)
+  checkPath(host: string, path: string): Promise<PathReport>;
+  launcherFor(host: string): { checkPath(path: string): Promise<PathReport> };   // what plan 08's `register --host` uses
+  kindFor(host: string): "local" | "remote" | "fake";
+}
+export function launcherKindOf(launcher: Launcher, host: string): "local" | "remote" | "fake";   // a router's kindFor(host), else the launcher's own kind
+
+// packages/os/src/launcher/local.ts (changes)
+export function runArgv(spec: InstanceSpec): string[];   // ["run", "--card", cardId, "--yes", "--no-tree", "--swarm-path", swarmPath, "--os", brainUrl] + ["--fresh"]: no --os-token
+export function instanceEnv(spec: InstanceSpec, parent: NodeJS.ProcessEnv): Record<string, string>;   // the INHERITED_ENV keys, then allowedSpecEnv(spec)
+// LocalLauncher gains checkPath(path: string): Promise<PathReport> (inspectPath)
+
+// packages/os/src/launcher/fake.ts (additions)
+export class FakeLauncher implements Launcher {
+  /* Task 4's members, and */
+  readonly unreachable: Set<string>;          // hosts that do not answer: start, stop, resourcesOn and pathOn reject HostUnreachableError(host, "fake: unreachable"); status answers "unreachable"
+  readonly released: Array<{ handle: LauncherHandle; outcome: ReleaseOutcome }>;
+  readonly pathReports: Map<string, PathReport>;
+  acquiredHost: string | null;                // the host start() reports; null: spec.registration.host
+  setStatus(instanceId: string, status: "running" | "gone" | "unreachable"): void;
+  release(handle: LauncherHandle, outcome: ReleaseOutcome): Promise<void>;
+  resourcesOn(host: string): Promise<ResourceSnapshot>;   // { ...snapshot, host }
+  pathOn(host: string, path: string): Promise<PathReport>;   // pathReports.get(path) ?? NO_PATH
+  checkPath(path: string): Promise<PathReport>;               // the same
+}
+
+// packages/os/src/dispatch/mount.ts (changes)
+export interface MountDeps { /* Tasks 14 and 15 */ remote?: Launcher & RemoteOps; hostProvider?: HostProvider; ssh?: string; sshEnv?: NodeJS.ProcessEnv }
+export interface DispatchModule { /* Tasks 14 and 15 */ router: LauncherRouter }   // launcher is the same router
+
+// packages/os/tests/dispatch/harness.ts (changes)
+export function harness(opts?: { registration?: Partial<RegistrationRow>; limits?: Partial<OsConfig["limits"]>; metrics?: Metrics; remote?: boolean; launcherConfig?: OsConfig["launcher"]; remoteLauncher?: Launcher & RemoteOps }): Promise<Harness>;
+export interface Harness { /* Task 6's, and */ remote: FakeLauncher; router: LauncherRouter | null }
+```
+
+**Router rules.** `config` is read at every call, so a SIGHUP edit applies.
+- `start(spec)`, with `host = spec.registration.host`, refusing in this order with a `LaunchError`: not in `limits.launcher_hosts` → `host <h> is not in limits.launcher_hosts`; `"local"` while `launcher.local` is false → `the local launcher is off (os.json launcher.local)`; any other name not in `launcher.hosts` → `host <h> is not in os.json launcher.hosts`; no remote launcher → `this brain has no remote launcher`. Then `local.start` for `"local"`, `remote.start` otherwise. This is the second layer: Task 18's `resources` check refuses the same cases before an instance row exists.
+- `status`, `stop` and `release` go by `handle.host`: `"local"` → `local`, anything else → `remote` (an acquired machine's name is not in `launcher.hosts`, so the router never filters by it; `RemoteLauncher` finds the machine). With no remote, `status` answers `"unreachable"`, `stop` rejects `this brain has no remote launcher`, and `release` does nothing. `release` reaches a launcher at most once per instance id per brain process, and only one that has `release`.
+- `resources()` is always `local.resources()`: the brain's own machine, sampled even when `launcher.local` is false (sampling starts nothing). `probe(host)` is `remote.resourcesOn(host)`. `checkPath("local", p)` is `local.checkPath(p)` (a `LaunchError` when the local launcher has none); any other host is `remote.pathOn(host, p)`.
+- `kindFor("local")` is the local launcher's kind; any other host is the remote launcher's kind, `"remote"` when there is none.
+
+**Dispatcher, sweep and run control.**
+- `dispatchLocked` step 4: `brainUrl` is `localBrainUrl(config)` when `registration.host` is `"local"`, else `config.public_url` (a remote run calls the brain's public URL outbound; replaces Task 6's choice by launcher kind). Step 5 also patches `host: handle.host` when it differs from the row's: a provider's machine is the instance's host from then on, and `handleOf(row)` routes to it.
+- `checkResources` (Task 5), right after the `store.ping()` refusal: the router's three host refusals above, with the same texts, as `resources` failures (outcome `refused`). The overview's "the dispatcher refuses a host missing from `limits.launcher_hosts`" is this check.
+- `onAttach`'s `swarm_os_instance_launch_to_attach_seconds` label is `launcherKindOf(launcher, row.host)`.
+- `sweep()` step 2: `"unreachable"` keeps the row as it is, posts nothing and never `detached`; only a host's own `"gone"` ends an instance. Step 3: a `launcher.stop` that rejects is logged with `warn` and the request stays `stop_requested:immediate:<t>`, so the next sweep tries again.
+- `RunControl`: a `launcher.stop` (a never-attached run) that rejects with `HostUnreachableError` answers `{ ok: false, text: "<host> did not answer (<detail>); /<pause run|stop run> <id> again when it returns", data: { code: "conflict" } }`, keeping the persisted request; other errors are unchanged.
+
+**Mount.** In `mountDispatch` step 1: `local` is `deps.launcher` or the `LocalLauncher` as before; `remote = deps.remote ?? new RemoteLauncher({ provider: deps.hostProvider ?? new StaticHostProvider(config), ssh: deps.ssh, env: deps.sshEnv, instanceInfo: (id) => instanceInfo(store, id), log })`; `router = new LauncherRouter({ config, local: meteredLauncher(local, metrics), remote: meteredLauncher(remote, metrics), log })`. The `Dispatcher`, `RunControl`, `ResourceMonitor`, `DispatchModule.launcher` and `DispatchModule.router` get the router; Task 15's `onChildExit` stays on the raw `LocalLauncher`. `instanceInfo(store, id)` reads the instance and its registration into `{ swarmPath, cardId }` (null when either is missing). In step 4, an instance change with an ended state also calls `router.release(handleOf(row), releaseOutcome(row))` (errors logged). `start()` first releases, with `"failed"`, every instance on a host other than `"local"` that ended with `BRAIN_RESTART_FOUND_GONE` at or after the mount (plan 03's reconcile ends them between the mount and `start()`), then runs `runs.republishPending()`. In `brain-module.ts`, `deps.remote` is `ctx.inject.remote` (add `remote?: unknown` to `BrainInject` by declaration merging there when plan 03's interface lacks it). `services.dispatch.launcher` is now the router, so plan 03's reconcile and `/health` go through it.
+
+- [ ] **Step 1: Change Task 11's expectations and write the failing tests**
+
+In `tests/launcher/local.test.ts`: the first `runArgv` expectation becomes `["run", "--card", "card-1", "--yes", "--no-tree", "--swarm-path", "/path/to/project-a/.swarm", "--os", "http://127.0.0.1:3200"]`; the first `instanceEnv` expectation gains `SWARM_OS_TOKEN: "inst_secret"`; the spoof case becomes `expect(instanceEnv(spec(undefined, { env: { SWARM_OS_CONTEXT: "Use staging", SWARM_OS_INSTANCE_ID: "spoofed", SWARM_OS_TOKEN: "spoofed", GH_TOKEN: "ghp_x" } }), parent)).toEqual({ PATH: "/usr/bin", HOME: "/path/to/home", SSH_AUTH_SOCK: "/path/to/agent.sock", SWARM_OS_CONTEXT: "Use staging", SWARM_OS_INSTANCE_ID: "inst-t1", SWARM_OS_TOKEN: "inst_secret" })`. In the spawn test, after `expect(first.env).toContain("SWARM_OS_INSTANCE_ID")`, add `expect(first.env).toContain("SWARM_OS_TOKEN")`, `expect(first.argv).not.toContain("inst_secret")` and `expect(await launcher.checkPath(join(project, ".swarm"))).toMatchObject({ exists: true, directory: true, swarmDir: false })`.
+
+```ts
+// packages/os/tests/launcher/router.test.ts
+import { describe, it, expect } from "vitest";
+import { noopMetrics } from "@mnmal-ai/swarm-metrics";
+import { LauncherRouter, launcherKindOf } from "../../src/launcher/router.js";
+import { meteredLauncher, releaseOutcome } from "../../src/launcher/launcher.js";
+import type { OsConfig } from "../../src/config/schema.js";
+import { FakeLauncher } from "../../src/testing/index.js";
+import { hostConfig, instanceRow, registrationRow, silentLog } from "../dispatch/fixtures.js";
+
+const CONFIG = hostConfig([{ name: "host-a", ssh: "owner@mac-a" }]);
+const spec = (host: string, instanceId = "inst-1") => ({ instanceId, registration: registrationRow({ host }), cardId: "card-1", token: "inst_x", brainUrl: "https://os.example" });
+function rig(config: OsConfig = CONFIG, withRemote = true) {
+  const local = new FakeLauncher(), remote = new FakeLauncher();
+  return { local, remote, router: new LauncherRouter({ config, local, remote: withRemote ? remote : null, log: silentLog }) };
+}
+
+describe("LauncherRouter", () => {
+  it("routes a start by the registration's host, and status, stop and release by the handle's host", async () => {
+    const { local, remote, router } = rig();
+    const a = await router.start(spec("local", "inst-1"));
+    const b = await router.start(spec("host-a", "inst-2"));
+    expect([local.started.map((s) => s.instanceId), remote.started.map((s) => s.instanceId)]).toEqual([["inst-1"], ["inst-2"]]);
+    expect([await router.status(a), await router.status(b)]).toEqual(["running", "running"]);
+    remote.unreachable.add("host-a");
+    expect(await router.status(b)).toBe("unreachable");
+    remote.unreachable.delete("host-a");
+    await router.stop(b, "graceful");
+    await router.release(b, "stopped");
+    await router.release(b, "stopped");
+    expect([local.stopped, remote.stopped.map((s) => s.mode), remote.released]).toEqual([[], ["graceful"], [{ handle: b, outcome: "stopped" }]]);
+    expect(await router.resources()).toEqual(local.snapshot);
+    expect([router.kind, launcherKindOf(router, "local"), launcherKindOf(router, "host-a"), launcherKindOf(local, "host-a")]).toEqual(["router", "fake", "fake", "fake"]);
+  });
+
+  it("refuses a host the limits or os.json do not allow, before any launcher is asked", async () => {
+    const at = (over: Partial<OsConfig>) => rig({ ...CONFIG, ...over }).router;
+    await expect(at({ limits: { ...CONFIG.limits, launcher_hosts: ["local"] } }).start(spec("host-a"))).rejects.toThrow("host host-a is not in limits.launcher_hosts");
+    await expect(at({ limits: { ...CONFIG.limits, launcher_hosts: ["local", "host-a", "host-z"] } }).start(spec("host-z"))).rejects.toThrow("host host-z is not in os.json launcher.hosts");
+    await expect(at({ launcher: { ...CONFIG.launcher, local: false } }).start(spec("local"))).rejects.toThrow("the local launcher is off (os.json launcher.local)");
+    await expect(rig(CONFIG, false).router.start(spec("host-a"))).rejects.toThrow("this brain has no remote launcher");
+  });
+
+  it("checks a path on the machine a registration names", async () => {
+    const { local, remote, router } = rig();
+    const there = { exists: true, directory: true, swarmDir: true, realPath: "/path/to/project-a/.swarm" };
+    remote.pathReports.set("/path/to/project-a/.swarm", there);
+    expect(await router.launcherFor("host-a").checkPath("/path/to/project-a/.swarm")).toEqual(there);
+    expect(await router.checkPath("local", "/path/to/project-a/.swarm")).toEqual({ exists: false, directory: false, swarmDir: false, realPath: null });
+    local.pathReports.set("/path/to/project-a/.swarm", there);
+    expect(await router.launcherFor("local").checkPath("/path/to/project-a/.swarm")).toEqual(there);
+  });
+
+  it("keeps a launcher's own methods through the metering wrapper, and maps an ended row to its release outcome", () => {
+    const metered = meteredLauncher(new FakeLauncher(), noopMetrics);
+    expect([typeof metered.release, typeof metered.resourcesOn, typeof metered.pathOn, typeof metered.checkPath]).toEqual(["function", "function", "function", "function"]);
+    const rows = [["exited", "completed"], ["paused", "paused"], ["exited", "stopped"], ["failed", "gone"], ["login_expired", "login_expired"]] as const;
+    expect(rows.map(([state, exitReason]) => releaseOutcome(instanceRow({ state, exitReason })))).toEqual(["exited", "exited", "stopped", "failed", "failed"]);
+  });
+});
+```
+
+```ts
+// packages/os/tests/dispatch/remote-dispatch.test.ts
+import { describe, it, expect } from "vitest";
+import { RunControl } from "../../src/dispatch/instances.js";
+import { DispatchRooms } from "../../src/dispatch/room-opener.js";
+import { mountDispatch, type BrainHost } from "../../src/dispatch/mount.js";
+import { FakeBoardClient, FakeEventHub, FakeLauncher, FakeRoomOpener, MemoryOsStore, FakeClock } from "../../src/testing/index.js";
+import { harness, ev, notices, FakeTokens } from "./harness.js";
+import { T0, boardCard, boardRow, instanceRow, registrationRow, hostConfig, silentLog } from "./fixtures.js";
+
+const onHostA = () => harness({ remote: true, registration: { host: "host-a", minCards: 1 } });
+async function dispatchedOnHostA() {
+  const h = await onHostA();
+  await h.dispatcher.decideCard(ev(boardCard(1)));
+  const [row] = await h.store.instances.find({ cardId: "card-1" });
+  return { h, row };
+}
+
+describe("dispatch through the launcher router", () => {
+  it("starts a card registered on host-a through the remote launcher, pointing the run at the public URL", async () => {
+    const { h, row } = await dispatchedOnHostA();
+    expect([h.launcher.started.length, h.remote.started.map((s) => [s.cardId, s.brainUrl])]).toEqual([0, [["card-1", "https://os.example"]]]);
+    expect(row).toMatchObject({ host: "host-a", launcherHandle: "fake-1", state: "dispatching" });
+  });
+
+  it("records the machine the launcher acquired as the instance's host, and asks that machine from then on", async () => {
+    const h = await onHostA();
+    h.remote.acquiredHost = "vm-1";
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    expect(row.host).toBe("vm-1");
+    h.clock.advance(91_000);
+    await h.dispatcher.sweep();
+    h.remote.setStatus(row.id, "gone");
+    await h.dispatcher.sweep();
+    expect(await h.store.instances.get(row.id)).toMatchObject({ state: "failed", exitReason: "gone" });
+  });
+
+  it("refuses a host the limits do not list, and local when os.json turns the local launcher off", async () => {
+    const h = await harness({ remote: true, registration: { host: "host-b", minCards: 1 } });
+    expect(await h.dispatcher.decideCard(ev(boardCard(1)))).toMatchObject({ outcome: "refused", reason: "host host-b is not in limits.launcher_hosts" });
+    const off = await harness({ remote: true, registration: { minCards: 1 }, launcherConfig: { local: false, hosts: [{ name: "host-a", ssh: "owner@mac-a", swarm: "swarm" }] } });
+    expect((await off.dispatcher.decideCard(ev(boardCard(1)))).reason).toBe("the local launcher is off (os.json launcher.local)");
+    expect([h.remote.started, h.launcher.started, off.launcher.started]).toEqual([[], [], []]);
+  });
+
+  it("keeps an unresponsive instance whose host does not answer, and says nothing more about it", async () => {
+    const { h, row } = await dispatchedOnHostA();                      // never attached
+    h.remote.unreachable.add("host-a");
+    h.clock.advance(91_000);
+    for (let i = 0; i < 4; i++) { await h.dispatcher.sweep(); h.clock.advance(30_000); }
+    expect((await h.store.instances.get(row.id))?.state).toBe("unresponsive");
+    expect(notices(await h.posts("board", "board-a"))).toEqual(["unresponsive"]);
+    h.remote.unreachable.delete("host-a");
+    await h.dispatcher.onHeartbeat(row.id, { tokens: 5, phase: "working", currentTask: null });
+    expect((await h.store.instances.get(row.id))?.state).toBe("running");
+  });
+
+  it("tries an immediate stop the host could not hear again at the next sweep", async () => {
+    const { h, row } = await dispatchedOnHostA();
+    await h.store.instances.patch(row.id, { exitReason: `stop_requested:immediate:${T0.toISOString()}` });
+    h.remote.unreachable.add("host-a");
+    h.clock.advance(31_000);
+    await h.dispatcher.sweep();
+    expect([h.remote.stopped, (await h.store.instances.get(row.id))?.exitReason]).toEqual([[], `stop_requested:immediate:${T0.toISOString()}`]);
+    h.remote.unreachable.delete("host-a");
+    await h.dispatcher.sweep();
+    expect([h.remote.stopped.map((s) => s.mode), (await h.store.instances.get(row.id))?.exitReason]).toEqual([["immediate"], "stop_requested:immediate:escalated"]);
+  });
+
+  it("answers a pause it could not deliver to a run on a host that does not answer", async () => {
+    const { h, row } = await dispatchedOnHostA();
+    const runs = new RunControl({ store: h.store, dispatcher: h.dispatcher, launcher: h.router!, hub: new FakeEventHub(), boards: {}, rooms: new DispatchRooms({ store: h.store, opener: h.opener, config: h.config }), clock: h.clock, log: silentLog });
+    h.remote.unreachable.add("host-a");
+    expect(await runs.pause(row.id, "owner")).toEqual({ ok: false, text: `host-a did not answer (fake: unreachable); /pause run ${row.id} again when it returns`, data: { code: "conflict" } });
+    expect((await h.store.instances.get(row.id))?.exitReason).toBe("pause_requested");
+  });
+
+  it("mountDispatch goes through the router and releases each remote instance once when it ends", async () => {
+    const store = new MemoryOsStore();
+    const clock = new FakeClock(T0);
+    await store.boards.put(boardRow());
+    await store.registrations.put(registrationRow({ host: "host-a", minCards: 1 }));
+    await store.instances.put(instanceRow({ id: "inst-old", cardId: "card-8", host: "host-a", state: "exited", exitReason: "brain_restart_found_gone", endedAt: T0.toISOString() }));   // as plan 03's reconcile leaves it, between the mount and start()
+    const fake = new FakeBoardClient("trello");
+    fake.setQueue("board-a", [boardCard(1)]);
+    const remote = new FakeLauncher();
+    const host: BrainHost = { hub: new FakeEventHub(), tokens: new FakeTokens(store), route: () => {}, addPeriodic: () => {}, dispatchGates: [] };
+    const mod = mountDispatch(host, { store, config: hostConfig([{ name: "host-a", ssh: "owner@mac-a" }]), rooms: new FakeRoomOpener(store, clock), clock, log: silentLog, launcher: new FakeLauncher(), remote, boards: { trello: fake } });
+    expect(mod.launcher).toBe(mod.router);
+    await mod.poller.pollNow("board-a");
+    const [row] = await store.instances.find({ cardId: "card-1" });
+    await mod.dispatcher.onExit(row.id, { reason: "completed", code: 0 });
+    await mod.dispatcher.onExit(row.id, { reason: "completed", code: 0 });
+    await mod.start();
+    expect(remote.released.map((r) => [r.handle.instanceId, r.outcome])).toEqual([[row.id, "exited"], ["inst-old", "failed"]]);
+  });
+});
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd packages/os && npx vitest run tests/launcher/router.test.ts tests/launcher/local.test.ts tests/dispatch/remote-dispatch.test.ts`
+Expected: FAIL — cannot load `../../src/launcher/router.js`; `runArgv` still carries `--os-token`; `harness` has no `remote` option.
+
+- [ ] **Step 3: Implement** `router.ts`, the launcher, `FakeLauncher`, check, dispatcher, run-control, mount and brain-module changes to the rules above, and the harness's `remote` option: with it, the config is `hostConfig([{ name: "host-a", ssh: "owner@mac-a" }], opts.limits)` with `opts.launcherConfig` replacing its `launcher` block, `h.remote` is a second `FakeLauncher`, and the `Dispatcher` (and `restart()`'s) gets `h.router = new LauncherRouter({ config, local: h.launcher, remote: opts.remoteLauncher ?? h.remote, log: silentLog })`; without it, `h.router` is null, `h.remote` an unused `FakeLauncher`, and everything is as before. Append `LauncherRouter`, `launcherKindOf`, `releaseOutcome` and the types `RemoteOps`, `LocalOps` to the `// plan 04` block of `src/index.ts`.
+
+- [ ] **Step 4: Run the tests, the package gate and the workspace build**
+
+Run: `cd packages/os && npx vitest run tests/launcher tests/dispatch tests/metrics`
+Expected: PASS (`router.test.ts`'s 4 tests, `remote-dispatch.test.ts`'s 7, and every earlier test, with Task 11's changed expectations). Then the package gate, `pnpm -w build` (exit 0) and `cd packages/cli && npx vitest run` (the CLI suite, Tasks 16 and 17 included, stays green).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/launcher packages/os/src/dispatch packages/os/src/index.ts packages/os/tests/launcher packages/os/tests/dispatch
+git -c commit.gpgsign=false commit -m "feat(os): route instances to the local or remote launcher by host, and pass the instance token by environment only"
+```
+
+---
+
+### Task 19: `HostMonitor`, `host_unreachable` holds and per-host resources
+
+**Files:**
+- Create: `packages/os/src/launcher/host-monitor.ts`
+- Modify: `packages/os/src/dispatch/checks.ts` (a down host is a quiet hold; `isBlockingEnd`), `packages/os/src/dispatch/dispatcher.ts` (`useHosts`; an unreachable start), `packages/os/src/dispatch/room-opener.ts` (`Notice` gains `host_down`, `host_up`, `orphan_stopped`), `packages/os/src/resources/resources.ts` (per host), `packages/os/src/dispatch/mount.ts`, `packages/os/src/dispatch/brain-module.ts`, `packages/os/src/index.ts`
+- Modify: `packages/os/tests/resources/resources.test.ts` (Task 12's expectations), `packages/os/tests/dispatch/mount.test.ts` and `packages/os/tests/dispatch/brain-module.test.ts` (a fourth periodic)
+- Test: `packages/os/tests/dispatch/host-unreachable.test.ts`
+
+**Interfaces:**
+- Consumes: Task 18's `LauncherRouter` (`probe`, `status`, `stop`), `RemoteLauncher`, the harness's `remote` option; Task 17's `HostUnreachableError`; Task 12's `ResourceMonitor`; Task 5's `checkResources`, `isBlockingEnd`, `ACTIVE_STATES`, `computeUsage`; Task 4's `DispatchRooms`, `PeriodicTask`, `staffOnly`; plan 03's ruling C30 (`/health`'s `hosts` from `services.hosts?.()`; `hello.resources` as `ResourceSnapshot[]`).
+- Produces:
+
+```ts
+// packages/os/src/launcher/host-monitor.ts
+export const HOST_PROBE_EVERY_MS = 60_000;
+export const HOST_DOWN_AFTER_FAILURES = 2;
+export const HOST_UNREACHABLE = "host_unreachable";      // an unheard start's exitReason, and the prefix of every hold reason for a down host
+export type HostState = "up" | "down" | "unknown";
+export interface HostStatusSource { state(host: string): HostState; downSince(host: string): string | null; markDown?(host: string, detail: string): Promise<void> }
+export interface HostMonitorDeps {
+  config: OsConfig; router: Pick<LauncherRouter, "probe" | "status" | "stop">; store: OsStore; rooms: DispatchRooms;
+  resources: { record(snapshot: ResourceSnapshot): Promise<unknown> };
+  refresh: (boardId: string) => Promise<unknown>;         // Poller.pollNow: a fresh listing, then reevaluateHolds
+  clock: Clock; log: Logger;
+}
+export class HostMonitor implements HostStatusSource {
+  constructor(deps: HostMonitorDeps);
+  periodic(): PeriodicTask;                               // { name: "hosts", everyMs: HOST_PROBE_EVERY_MS, run: () => probeAll() }; a failure is logged, never thrown
+  probeAll(): Promise<Record<string, HostState>>;         // every host of config.launcher.hosts, together; the states after
+  markDown(host: string, detail: string): Promise<void>;  // a start found the host unreachable: down at once
+  state(host: string): HostState;                         // "local" and names not configured: "up"
+  downSince(host: string): string | null;
+  states(): Record<string, HostState>;                    // every configured host, in config order: plan 03's services.hosts
+}
+export function formatDowntime(ms: number): string;       // under 120 s "<s> s"; under 2 h "<m> min"; else "<h> h <m> min" (whole units, rounded down)
+export function isHostUnreachableReason(exitReason: string | null): boolean;   // starts with HOST_UNREACHABLE
+
+// packages/os/src/dispatch/dispatcher.ts
+// Dispatcher gains: useHosts(hosts: HostStatusSource): void   (like addGate: mountDispatch calls it once the monitor exists)
+// packages/os/src/dispatch/checks.ts
+export function checkResources(ctx: Pick<ChainContext, "store" | "config" | "clock" | "gates" | "hosts">, registration: RegistrationRow): Promise<CheckResult & { hold?: true }>;   // ChainContext gains hosts?: HostStatusSource
+
+// packages/os/src/resources/resources.ts (changes)
+export function hostUsage(store: OsStore, clock: Clock, host: string): UsageSource;   // computeUsage limited to live rows with that host, and to the projects whose registrations name it
+export class ResourceMonitor {
+  constructor(deps: { store: OsStore; launcher: Launcher; hub: EventPublisher; clock: Clock; log: Logger; metrics?: Metrics; hosts?: () => string[]; hostStates?: () => Record<string, HostState> });
+  sample(): Promise<ResourceSnapshot>;                    // the brain's own machine, launcher.resources(), through record()
+  record(snapshot: ResourceSnapshot): Promise<void>;      // put the row; prune that host's rows older than RESOURCE_HISTORY_MS; publish "resources" { snapshots: await latest() } to staffOnly; Task 15's eight swarm_os_launcher_* gauges only for host "local"
+  latest(): Promise<ResourceSnapshot[]>;                  // "local" first, then each of hosts() in order: that host's newest row in the last hour, when it has one
+  history(): Promise<ResourceSnapshot[]>;                 // every host, the last hour, oldest first
+  periodic(): PeriodicTask;                               // unchanged: { name: "resources", everyMs: RESOURCES_EVERY_MS } samples the brain's machine only
+  route(): RouteSpec;                                     // GET /api/resources → 200 { latest, history, hosts: hostStates?.() ?? {} }
+}
+
+// packages/os/src/dispatch/mount.ts
+export interface DispatchModule { /* Tasks 14, 15 and 18 */ hosts: HostMonitor }
+```
+
+**Host states.** Up and down are a cache of the last probes, held in memory; what the owners were told is not: on its first probe or `markDown` of a host, the monitor reads the newest system-room message whose `data.notice` is `host_down` or `host_up` and whose `data.host` is that host, and a `host_down` there makes the host `down` at once, silently, with `downSince` that message's `createdAt`. A restarted brain therefore neither repeats an outage nor misses a return.
+- A probe is `router.probe(name)`. A snapshot → `resources.record(snapshot)`, the failure count back to 0, and the up path when the state was `down`; from `unknown` the state becomes `up` with nothing said. A `HostUnreachableError` → one more failure (the first one's time kept); at `HOST_DOWN_AFTER_FAILURES` the down path, with `downSince` the first failure's time. One missed probe (a short network drop) is not an outage. Any other error means the host answered: logged with `warn`, the failure count back to 0, and the up path when it was `down`.
+- `markDown(host, detail)`: the down path now, unless the host is already down (a start's own evidence needs no second probe).
+- The down path: state `down`, then `host_down` in the system room.
+- The up path, in this order: (1) **orphans**: each instance with `host` this host, `state: "failed"` and `exitReason: "host_unreachable"` (a start the brain never heard back from) is asked `router.status({ instanceId, host, handle: "" })`, which the helper answers from its record; `running` → `router.stop(…, "immediate")`, `exitReason: "host_unreachable:orphan_stopped"`, and `orphan_stopped` in its board room; `gone` → `exitReason: "host_unreachable:checked"`; anything else leaves the row for the next return. (2) State `up`, `downSince` null. (3) `host_up` in the system room. (4) `refresh(boardId)` for each registration on this host that is not paused, in registration id order (errors logged), so held cards are re-decided against a fresh listing. A run that started though its start was never heard is thus stopped before its card can be dispatched again.
+
+**Dispatch.**
+- `checkResources`, after Task 18's host refusals: `hosts?.state(registration.host) === "down"` fails `resources` with `hold: true` and the detail `host_unreachable: <host> has not answered since <downSince>; the card is re-decided when it returns`. `runChain` makes that outcome `hold` with `quiet: true` (the owners heard once, from the monitor) and posts no `refused` notice; `dispatchLocked`'s re-check throws `DispatchRefusedError(check, "hold")`, which `RunControl` and the commands answer as a `conflict`.
+- `isBlockingEnd`: a `failed` row whose `exitReason` passes `isHostUnreachableReason` is not blocking, so a card whose start went unheard is re-decided, not held for a person.
+- `dispatchLocked` step 4, when `launcher.start` rejects with `HostUnreachableError` (an ssh that does not answer, or a provider with no machine): patch the instance `failed`, `exitReason: "host_unreachable"`, `endedAt`; `tokens.revokeInstanceToken`; close the room; patch the decision to `hold`, `decidedBy: "policy"`, reason `host_unreachable: <err.host> did not answer when <instance> started (<err.detail>); the card is re-decided when it returns`, with one failed `resources` check of that detail; emit both changes; `await hosts?.markDown?.(registration.host, err.detail)`; return the failed row. No board notice and no `onDecision`, as for a spawn failure; the monitor's `host_down` is the one message. Every other start failure keeps Task 6's `spawn_failed` path.
+
+**Room notices** (also in the table at the top of this plan): `host_down` (system) `<host> is unreachable (<detail>). Live instances there: <n>, kept and rechecked. New cards for <board names, sorted, ", ", or "no board"> are held until it answers.`; `host_up` (system) `<host> answers again after <formatDowntime(now − downSince)>. Held cards for <boards> are being re-decided.`; `orphan_stopped` (board) `<instance> had started on <host> although the brain never heard back; it was stopped before <k> is decided again.` Each carries `data { notice, host }` (and `instanceId` for `orphan_stopped`).
+
+**Resources per host.** The brain samples its own machine every 15 s as before; a remote host's snapshot comes from the monitor's probe once a minute (one ssh call per host per minute, not four), through `record`. The SSE `resources` event's payload becomes `{ snapshots: ResourceSnapshot[] }`, the whole per-host list after each record, so a client replaces its state. `GET /api/resources` answers `{ latest: ResourceSnapshot[], history: ResourceSnapshot[], hosts: Record<string, HostState> }`. In `mountDispatch`: the local launcher's usage source is `hostUsage(store, clock, "local")` (it counted every instance before), the `RemoteLauncher`'s is `(h) => hostUsage(store, clock, h)`, the `ResourceMonitor` gets `hosts: () => config.launcher.hosts.map((h) => h.name)` and `hostStates: () => monitor.states()`, then `monitor = new HostMonitor({ config, router, store, rooms, resources, refresh: (id) => poller.pollNow(id), clock, log })`, `dispatcher.useHosts(monitor)`, and `host.addPeriodic(monitor.periodic())` after the sweep. `brain-module.ts` sets `ctx.services.hosts = () => module.hosts.states()` (declared on `BrainServices` by merging there when plan 03's interface lacks it); plan 03's `/health` and `hello` read it and `module.resources.latest()` (C30).
+
+- [ ] **Step 1: Change Task 12's, Task 14's and Task 15's expectations, and write the failing tests**
+
+In `tests/resources/resources.test.ts` (Task 12): the published payload becomes `[["resources", { snapshots: [snap(T0.toISOString())] }]]`; `monitor.latest()` is `[snap(T0.toISOString())]`; the route's body is `{ latest: [snap(T0.toISOString())], history: await monitor.history(), hosts: {} }`. Add this test to that file (importing `hostUsage`):
+
+```ts
+it("keeps one latest snapshot per host, the brain's machine first, and counts usage per host", async () => {
+  const store = new MemoryOsStore();
+  const clock = new FakeClock(T0);
+  const hub = new FakeEventHub();
+  const launcher = new FakeLauncher();
+  launcher.snapshot = snap(T0.toISOString());
+  const monitor = new ResourceMonitor({ store, launcher, hub, clock, log: silentLog, hosts: () => ["host-a", "host-b"], hostStates: () => ({ "host-a": "up", "host-b": "down" }) });
+  await monitor.record({ ...snap(T0.toISOString()), host: "host-a", claudeSessions: 0 });
+  await monitor.sample();
+  expect((await monitor.latest()).map((s) => [s.host, s.claudeSessions])).toEqual([["local", 2], ["host-a", 0]]);
+  expect(hub.published.at(-1)?.payload).toEqual({ snapshots: await monitor.latest() });
+  expect((await monitor.route().handler({ params: {}, query: {}, headers: {}, body: undefined, rawBody: "", actor: OWNER })).body).toMatchObject({ hosts: { "host-a": "up", "host-b": "down" } });
+  await store.registrations.put(registrationRow());
+  await store.registrations.put(registrationRow({ id: "reg-b", boardId: "board-b", projectName: "project-b", host: "host-a" }));
+  await store.instances.put(instanceRow({ id: "a", state: "running", tokens: 700, dashboardUrl: "http://localhost:3141" }));
+  await store.instances.put(instanceRow({ id: "b", registrationId: "reg-b", boardId: "board-b", host: "host-a", state: "running", tokens: 300, dashboardUrl: "http://localhost:3142" }));
+  expect([await hostUsage(store, clock, "local").usage(), await hostUsage(store, clock, "host-a").usage()]).toEqual([
+    { instancesRunning: 1, portsInUse: [3141], tokensThisHour: { "project-a": 700 } },
+    { instancesRunning: 1, portsInUse: [3142], tokensThisHour: { "project-b": 300 } },
+  ]);
+});
+```
+
+In `tests/dispatch/mount.test.ts` the periodics become `[["poller", 120_000], ["resources", 15_000], ["sweep", 30_000], ["hosts", 60_000]]`, and the first test also expects `mod.hosts.states()` to equal `{}`; in `tests/dispatch/brain-module.test.ts` the three periodics become four and `ctx.services.hosts?.()` equals `{}`.
+
+```ts
+// packages/os/tests/dispatch/host-unreachable.test.ts
+import { describe, it, expect } from "vitest";
+import { HostMonitor, type HostMonitorDeps } from "../../src/launcher/host-monitor.js";
+import { RemoteLauncher } from "../../src/launcher/remote.js";
+import { DispatchRooms } from "../../src/dispatch/room-opener.js";
+import { latestDecision, upsertDecision } from "../../src/dispatch/decisions.js";
+import { ResourceMonitor } from "../../src/resources/resources.js";
+import { FakeEventHub } from "../../src/testing/index.js";
+import { harness, ev, notices, type Harness } from "./harness.js";
+import { T0, boardCard, instanceRow, silentLog } from "./fixtures.js";
+
+const QUEUE = [boardCard(1), boardCard(2, { version: "2026-10-25T08:30:00.000Z" })];
+const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000).toISOString();
+async function monitored() {
+  const h = await harness({ remote: true, registration: { host: "host-a", minCards: 1, maxInstances: 2 } });
+  const resources = new ResourceMonitor({ store: h.store, launcher: h.router!, hub: new FakeEventHub(), clock: h.clock, log: silentLog, hosts: () => ["host-a"] });
+  const log: string[] = [];
+  const deps: HostMonitorDeps = {
+    config: h.config, router: h.router!, store: h.store, rooms: new DispatchRooms({ store: h.store, opener: h.opener, config: h.config }), resources, clock: h.clock, log: silentLog,
+    refresh: async (boardId) => { log.push(`refresh ${boardId} after ${h.remote.stopped.length} stops`); await h.dispatcher.noteQueue(boardId, QUEUE); await h.dispatcher.reevaluateHolds(boardId); },
+  };
+  const make = () => { const m = new HostMonitor(deps); h.dispatcher.useHosts(m); return m; };
+  return { h, monitor: make(), make, resources, log };
+}
+const systemPosts = async (h: Harness) => (await h.posts("system")).map((m) => [m.body, JSON.parse(m.dataJson ?? "{}")]);
+
+describe("hosts that stop answering", () => {
+  it("tells the owners once when a host goes down, after two missed probes, and once when it returns", async () => {
+    const { h, monitor, resources, log } = await monitored();
+    expect([monitor.periodic().name, monitor.periodic().everyMs, monitor.states()]).toEqual(["hosts", 60_000, { "host-a": "unknown" }]);
+    await monitor.probeAll();
+    expect([monitor.states(), (await resources.latest()).map((s) => s.host)]).toEqual([{ "host-a": "up" }, ["host-a"]]);
+    h.remote.unreachable.add("host-a");
+    h.clock.advance(60_000); await monitor.probeAll();
+    expect(monitor.state("host-a")).toBe("up");                                 // one missed probe is not an outage
+    h.clock.advance(60_000); await monitor.probeAll();
+    h.clock.advance(60_000); await monitor.probeAll();
+    expect([monitor.state("host-a"), monitor.downSince("host-a")]).toEqual(["down", at(60)]);
+    h.remote.unreachable.delete("host-a");
+    h.clock.advance(300_000); await monitor.probeAll();
+    expect(await systemPosts(h)).toEqual([
+      ["host-a is unreachable (fake: unreachable). Live instances there: 0, kept and rechecked. New cards for board-a are held until it answers.", { notice: "host_down", host: "host-a" }],
+      ["host-a answers again after 7 min. Held cards for board-a are being re-decided.", { notice: "host_up", host: "host-a" }],
+    ]);
+    expect(log).toEqual(["refresh board-a after 0 stops"]);
+  });
+
+  it("holds a down host's new cards quietly and re-decides them when it returns", async () => {
+    const { h, monitor, log } = await monitored();
+    await monitor.probeAll();
+    h.remote.unreachable.add("host-a");
+    await monitor.probeAll(); await monitor.probeAll();
+    const d = await h.dispatcher.decideCard(ev(boardCard(1)));
+    expect(d).toMatchObject({ outcome: "hold", decidedBy: "policy", reason: `host_unreachable: host-a has not answered since ${T0.toISOString()}; the card is re-decided when it returns` });
+    expect([h.decisions.at(-1)?.info.quiet, h.remote.started.length, await h.posts("board", "board-a")]).toEqual([true, 0, []]);
+    h.remote.unreachable.delete("host-a");
+    h.clock.advance(60_000);
+    await monitor.probeAll();
+    expect(log).toEqual(["refresh board-a after 0 stops"]);
+    expect(h.remote.started.map((s) => s.cardId)).toEqual(["card-1"]);
+  });
+
+  it("after a restart it neither repeats a host's outage nor misses its return", async () => {
+    const { h, monitor, make } = await monitored();
+    h.remote.unreachable.add("host-a");
+    await monitor.probeAll(); await monitor.probeAll();
+    const again = make();                                                       // the brain restarted
+    await again.probeAll();
+    expect([again.state("host-a"), notices(await h.posts("system"))]).toEqual(["down", ["host_down"]]);
+    h.remote.unreachable.delete("host-a");
+    h.clock.advance(120_000);
+    await again.probeAll();
+    expect((await systemPosts(h)).map(([body]) => body)).toEqual([expect.stringMatching(/^host-a is unreachable /), "host-a answers again after 2 min. Held cards for board-a are being re-decided."]);
+  });
+
+  it("stops a run that started although its start was never heard back, before its card is decided again", async () => {
+    const { h, monitor, log } = await monitored();
+    await h.store.instances.put(instanceRow({ id: "inst-orphan", cardId: "card-1", host: "host-a", state: "failed", exitReason: "host_unreachable", launcherHandle: null, endedAt: T0.toISOString() }));
+    await upsertDecision(h.store, { boardId: "board-a", cardId: "card-1", cardVersion: boardCard(1).version, outcome: "hold", checksJson: "[]", reason: "host_unreachable: host-a did not answer when inst-orphan started (fake: unreachable); the card is re-decided when it returns", instanceId: "inst-orphan", questionMessageId: null, decidedAt: T0.toISOString(), decidedBy: "policy" });
+    h.remote.setStatus("inst-orphan", "running");
+    h.remote.unreachable.add("host-a");
+    await monitor.probeAll(); await monitor.probeAll();
+    h.remote.unreachable.delete("host-a");
+    await monitor.probeAll();
+    expect(h.remote.stopped).toEqual([{ handle: { instanceId: "inst-orphan", host: "host-a", handle: "" }, mode: "immediate" }]);
+    expect((await h.store.instances.get("inst-orphan"))?.exitReason).toBe("host_unreachable:orphan_stopped");
+    expect((await h.posts("board", "board-a")).map((m) => m.body)).toEqual(["inst-orphan had started on host-a although the brain never heard back; it was stopped before board-a:card-1 is decided again."]);
+    expect([log, h.remote.started.map((s) => s.cardId)]).toEqual([["refresh board-a after 1 stops"], ["card-1"]]);
+  });
+
+  it("ends a start the host could not hear as host_unreachable, holds its card quietly, and marks the host down at once", async () => {
+    const { h, monitor } = await monitored();
+    h.remote.unreachable.add("host-a");
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    expect(row).toMatchObject({ state: "failed", exitReason: "host_unreachable", tokenHash: "revoked", launcherHandle: null });
+    expect((await h.store.rooms.get(row.roomId))?.closedAt).toBe(T0.toISOString());
+    expect(await latestDecision(h.store, boardCard(1).ref)).toMatchObject({ outcome: "hold", decidedBy: "policy", reason: `host_unreachable: host-a did not answer when ${row.id} started (fake: unreachable); the card is re-decided when it returns` });
+    expect([await h.posts("board", "board-a"), monitor.state("host-a"), notices(await h.posts("system"))]).toEqual([[], "down", ["host_down"]]);
+    const later = await h.dispatcher.decideCard(ev(QUEUE[1]));
+    expect(later.reason).toBe(`host_unreachable: host-a has not answered since ${T0.toISOString()}; the card is re-decided when it returns`);
+    h.remote.unreachable.delete("host-a");
+    await monitor.probeAll();
+    expect((await h.store.instances.get(row.id))?.exitReason).toBe("host_unreachable:checked");
+    expect(h.remote.started.map((s) => s.cardId)).toEqual(["card-1", "card-2"]);
+  });
+
+  it("treats a provider that cannot hand out a machine as an unreachable host", async () => {
+    const remote = new RemoteLauncher({ provider: { kind: "test", acquire: async () => { throw new Error("no machine available"); }, release: async () => {} }, ssh: "/path/to/missing-ssh" });
+    const h = await harness({ remote: true, remoteLauncher: remote, registration: { host: "host-a", minCards: 1 } });
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    expect(row).toMatchObject({ state: "failed", exitReason: "host_unreachable" });
+    expect((await latestDecision(h.store, boardCard(1).ref))?.reason).toBe(`host_unreachable: host-a did not answer when ${row.id} started (acquire failed: no machine available); the card is re-decided when it returns`);
+  });
+
+  it("REVIEW FOCUS 6: a laptop that sleeps mid-run keeps its instance, holds its host's new cards quietly, tells the owners once each way, and catches up", async () => {
+    const { h, monitor, log } = await monitored();
+    await monitor.probeAll();                                                   // host-a answers
+    await h.dispatcher.noteQueue("board-a", [boardCard(1)]);
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const [row] = await h.store.instances.find({ cardId: "card-1" });
+    await h.dispatcher.onAttach(row.id, { runId: "run-1", dashboardUrl: null, pid: 4242 });
+    h.remote.unreachable.add("host-a");                                         // the lid closes
+    h.clock.advance(91_000);
+    await h.dispatcher.sweep();
+    await monitor.probeAll();
+    h.clock.advance(60_000);
+    await monitor.probeAll();
+    for (let i = 0; i < 3; i++) { h.clock.advance(30_000); await h.dispatcher.sweep(); }
+    expect((await h.store.instances.get(row.id))?.state).toBe("unresponsive");
+    const held = await h.dispatcher.decideCard(ev(QUEUE[1]));
+    expect(held).toMatchObject({ outcome: "hold", reason: expect.stringMatching(/^host_unreachable: host-a has not answered since /) });
+    expect(h.decisions.at(-1)?.info.quiet).toBe(true);
+    h.remote.unreachable.delete("host-a");                                      // it wakes
+    await h.dispatcher.onHeartbeat(row.id, { tokens: 10, phase: "working", currentTask: null });
+    h.clock.advance(60_000);
+    await monitor.probeAll();
+    expect((await h.store.instances.get(row.id))?.state).toBe("running");
+    expect(notices(await h.posts("system"))).toEqual(["host_down", "host_up"]);
+    expect(notices(await h.posts("board", "board-a"))).not.toContain("gone");
+    expect(log).toEqual(["refresh board-a after 0 stops"]);
+    expect(h.remote.started.map((s) => s.cardId)).toEqual(["card-1", "card-2"]);   // card-1 once, card-2 when the host returned
+  });
+});
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd packages/os && npx vitest run tests/dispatch/host-unreachable.test.ts tests/resources/resources.test.ts tests/dispatch/mount.test.ts`
+Expected: FAIL — cannot load `../../src/launcher/host-monitor.js`; the resources payload is still `{ snapshot }`; three periodics, not four.
+
+- [ ] **Step 3: Implement** `host-monitor.ts`, the check, dispatcher, notice, resources, mount and brain-module changes to the rules above, and append `HostMonitor`, `HOST_UNREACHABLE`, `HOST_PROBE_EVERY_MS`, `formatDowntime`, `isHostUnreachableReason`, `hostUsage` and the types `HostState`, `HostStatusSource` to the `// plan 04` block of `src/index.ts`. The three notices are already in this plan's **Room notices** table, and the `{ snapshots }` payload in **Events published**.
+
+- [ ] **Step 4: Run the tests, the package gate and the workspace build**
+
+Run: `cd packages/os && npx vitest run tests/dispatch tests/resources tests/launcher tests/metrics`
+Expected: PASS (`host-unreachable.test.ts`'s 7 tests, `resources.test.ts`'s 4, and every earlier test with the changed expectations). Then the package gate, `pnpm -w build` (exit 0) and `cd packages/cli && npx vitest run`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/os/src/launcher/host-monitor.ts packages/os/src/dispatch packages/os/src/resources packages/os/src/index.ts \
+  packages/os/tests/dispatch packages/os/tests/resources
+git -c commit.gpgsign=false commit -m "feat(os): watch remote hosts, hold their cards while they are unreachable, and report resources per host"
+```
+
+---
+
+### Task 20: Metrics for the remote path
+
+The remote launcher's share of the owner's metrics requirement: every ssh call, each host's reachability over time, and how often a host drops out. Wired as Task 15 wired its rows.
+
+**Files:**
+- Modify: `packages/metrics/src/catalogue/os.ts` (the `// plan 04` slot of `OS_METRICS`, after Task 15's rows)
+- Modify: `packages/os/src/launcher/remote.ts`, `packages/os/src/launcher/host-monitor.ts`, `packages/os/src/dispatch/instances.ts` (`lifetimeOutcome`), `packages/os/src/dispatch/dispatcher.ts`, `packages/os/src/dispatch/mount.ts`
+- Test: `packages/os/tests/metrics/remote-metrics.test.ts`
+
+**Interfaces:**
+- Consumes: Task 15's conventions (`Metrics`, `noopMetrics`, `OS_METRICS`, `testRegistry`, the `hist`, `counter`, `gauge` helpers, spans on the registry's monotonic clock); Tasks 17 to 19.
+- Produces:
+
+```ts
+// remote.ts: RemoteLauncherOptions gains metrics?: Metrics
+// host-monitor.ts: HostMonitorDeps gains metrics?: Metrics
+// instances.ts
+export type LifetimeOutcome = /* Task 15's */ | "host_unreachable";
+export function lifetimeOutcome(state: InstanceRow["state"], exitReason: string | null): LifetimeOutcome;   // failed with an exitReason passing isHostUnreachableReason → "host_unreachable"; otherwise Task 15's mapping
+```
+
+| Name | Kind | Unit | Labels (values) | Recorded in |
+|---|---|---|---|---|
+| `swarm_os_launcher_ssh_seconds` | histogram | seconds | `op` (`HostOp`), `outcome` (`ok`, `error` for a host's own error reply or another protocol, `unreachable` for exit 255, an unreadable reply or no ssh, `timeout`) | `RemoteLauncher`'s one call, around the ssh child |
+| `swarm_os_host_up` | gauge | count | `host` (a `launcher.hosts` name) | `HostMonitor`, after every probe and `markDown`: 1 while up, 0 while down, not set while unknown |
+| `swarm_os_host_unreachable_total` | counter | count | `host` | `HostMonitor`, each time a host enters `down` (two missed probes, or `markDown`) |
+| `swarm_os_host_probe_seconds` | histogram | seconds | `host`, `outcome` (`ok`, `unreachable`, `error`) | `HostMonitor`, around each `router.probe` |
+
+`host` takes only names from `os.json` `launcher.hosts`, so its values are bounded by configuration; an acquired machine's own name never becomes a label. Existing rows gain values, not names: `swarm_os_launcher_op_seconds` records `launcher: "remote"` through Task 18's metered remote launcher and `outcome: "unreachable"` for `status`; `swarm_os_dispatch_decision_to_start_seconds` ends `host_unreachable` for Task 19's unheard start; `swarm_os_instance_lifetime_seconds` records `outcome: "host_unreachable"` there.
+
+The `MetricDef` entries, appended after Task 15's in the `// plan 04` slot:
+
+```ts
+  { name: "swarm_os_launcher_ssh_seconds", kind: "histogram", unit: "seconds", help: "One ssh call to a host's swarm os host helper, by op and outcome", labels: ["op", "outcome"] },
+  { name: "swarm_os_host_up", kind: "gauge", unit: "count", help: "1 while a launcher host answers its probes, 0 while it is down", labels: ["host"] },
+  { name: "swarm_os_host_unreachable_total", kind: "counter", unit: "count", help: "Times a launcher host became unreachable", labels: ["host"] },
+  { name: "swarm_os_host_probe_seconds", kind: "histogram", unit: "seconds", help: "One probe of a launcher host, by outcome", labels: ["host", "outcome"] },
+```
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// packages/os/tests/metrics/remote-metrics.test.ts
+import { describe, it, expect } from "vitest";
+import { OS_METRICS } from "@mnmal-ai/swarm-metrics";
+import { testRegistry } from "@mnmal-ai/swarm-metrics/testing";
+import { RemoteLauncher } from "../../src/launcher/remote.js";
+import { StaticHostProvider } from "../../src/launcher/host-provider.js";
+import { HostMonitor } from "../../src/launcher/host-monitor.js";
+import { DispatchRooms } from "../../src/dispatch/room-opener.js";
+import { lifetimeOutcome } from "../../src/dispatch/instances.js";
+import { sshRig } from "../launcher/ssh-rig.js";
+import { harness, ev } from "../dispatch/harness.js";
+import { boardCard, registrationRow, silentLog } from "../dispatch/fixtures.js";
+import { counter, gauge, hist } from "./helpers.js";
+
+describe("remote path metrics", () => {
+  it("times every ssh call by op and outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const rig = await sshRig({ start: { ok: true, protocol: 1, handle: "4242", reused: false }, status: { ok: false, protocol: 1, error: { code: "internal", message: "ps failed" } } });
+    const hosts = [{ name: "host-a", ssh: "owner@mac-a" }, { name: "host-d", ssh: "down-host" }, { name: "host-h", ssh: "hang-host" }].map((h) => ({ ...h, swarm: rig.swarm }));
+    const remote = new RemoteLauncher({ provider: new StaticHostProvider({ launcher: { local: true, hosts } }), ssh: rig.ssh, env: rig.env, timeoutsMs: { status: 300 }, metrics });
+    await remote.start({ instanceId: "inst-r1", registration: registrationRow({ host: "host-a" }), cardId: "card-1", token: "inst_secret_r1", brainUrl: "https://os.example" });
+    for (const host of ["host-a", "host-d", "host-h"]) await remote.status({ instanceId: "inst-r1", host, handle: "4242" }).catch(() => {});
+    const s = metrics.snapshot();
+    for (const [op, outcome] of [["start", "ok"], ["status", "error"], ["status", "unreachable"], ["status", "timeout"]]) {
+      expect(hist(s, "swarm_os_launcher_ssh_seconds", { op, outcome })?.count, `${op} ${outcome}`).toBe(1);
+    }
+  }, 10_000);
+
+  it("keeps each host's up gauge, counts its outages and times its probes", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ remote: true, registration: { host: "host-a" } });
+    const monitor = new HostMonitor({ config: h.config, router: h.router!, store: h.store, rooms: new DispatchRooms({ store: h.store, opener: h.opener, config: h.config }), resources: { record: async () => {} }, refresh: async () => {}, clock: h.clock, log: silentLog, metrics });
+    await monitor.probeAll();
+    h.remote.unreachable.add("host-a");
+    await monitor.probeAll();
+    expect(gauge(metrics.snapshot(), "swarm_os_host_up", { host: "host-a" })).toBe(1);   // one missed probe
+    await monitor.probeAll();
+    let s = metrics.snapshot();
+    expect([gauge(s, "swarm_os_host_up", { host: "host-a" }), counter(s, "swarm_os_host_unreachable_total", { host: "host-a" })]).toEqual([0, 1]);
+    h.remote.unreachable.delete("host-a");
+    await monitor.probeAll();
+    s = metrics.snapshot();
+    expect(gauge(s, "swarm_os_host_up", { host: "host-a" })).toBe(1);
+    expect([hist(s, "swarm_os_host_probe_seconds", { host: "host-a", outcome: "ok" })?.count, hist(s, "swarm_os_host_probe_seconds", { host: "host-a", outcome: "unreachable" })?.count]).toEqual([2, 2]);
+  });
+
+  it("records an unheard start as its own lifetime and start outcome", async () => {
+    const { metrics } = testRegistry(OS_METRICS);
+    const h = await harness({ remote: true, registration: { host: "host-a", minCards: 1 }, metrics });
+    h.remote.unreachable.add("host-a");
+    await h.dispatcher.decideCard(ev(boardCard(1)));
+    const s = metrics.snapshot();
+    expect([hist(s, "swarm_os_instance_lifetime_seconds", { outcome: "host_unreachable" })?.count, hist(s, "swarm_os_dispatch_decision_to_start_seconds", { outcome: "host_unreachable" })?.count]).toEqual([1, 1]);
+    expect([lifetimeOutcome("failed", "host_unreachable"), lifetimeOutcome("failed", "host_unreachable:checked"), lifetimeOutcome("failed", "spawn_failed: ENOENT swarm")]).toEqual(["host_unreachable", "host_unreachable", "spawn_failed"]);
+  });
+});
+```
+
+- [ ] **Step 2: Run it to see it fail**
+
+Run: `pnpm --filter @mnmal-ai/swarm-metrics build && cd packages/os && npx vitest run tests/metrics/remote-metrics.test.ts`
+Expected: FAIL — every `hist(...)` and `gauge(...)` is `undefined` (strict registries refuse the unknown names as soon as the code records them, so add the rows first).
+
+- [ ] **Step 3: Implement**
+
+1. Append the four rows to `OS_METRICS` and run `pnpm --filter @mnmal-ai/swarm-metrics build`.
+2. `RemoteLauncher`: `metrics ?? noopMetrics`; its one call runs inside a `swarm_os_launcher_ssh_seconds` span `{ op }`, ended `ok`, `error`, `unreachable` or `timeout` before it resolves or rejects.
+3. `HostMonitor`: each probe inside a `swarm_os_host_probe_seconds` span `{ host }` ended `ok`, `unreachable` or `error`; after it (and after `markDown`) set `swarm_os_host_up { host }` to 1 or 0 by the state, unless unknown; increment `swarm_os_host_unreachable_total { host }` on each entry into `down`.
+4. `lifetimeOutcome` gains `host_unreachable`; `dispatchLocked`'s unheard-start path observes `swarm_os_instance_lifetime_seconds { outcome: "host_unreachable" }` and ends its `swarm_os_dispatch_decision_to_start_seconds` span `host_unreachable`.
+5. `mountDispatch` passes `metrics` to the `RemoteLauncher` it builds and to the `HostMonitor`.
+
+- [ ] **Step 4: Run the tests, the package gate and the workspace build**
+
+Run: `cd packages/os && npx vitest run tests/metrics tests/launcher tests/dispatch`
+Expected: PASS (`remote-metrics.test.ts`'s 3 tests and every earlier test). Then the package gate, `pnpm -w build` (exit 0) and `cd packages/cli && npx vitest run`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/metrics/src/catalogue/os.ts packages/os/src/launcher packages/os/src/dispatch packages/os/tests/metrics/remote-metrics.test.ts
+git -c commit.gpgsign=false commit -m "feat(os): measure ssh calls, host reachability and host outages"
+```
+
+---
+
+### Task 21: `swarm os host check <name>` and the opt-in real-host test
+
+**Files:**
+- Modify: `packages/cli/src/cli/os-host.ts` (the operator command)
+- Test: `packages/cli/tests/os-host-check.test.ts`, `packages/os/tests/launcher/remote-real.test.ts`
+
+**Interfaces:**
+- Consumes: Task 16's `runOsHost`, `hostCheck`, `HostReplies`; Task 17's `RemoteLauncher`, `StaticHostProvider`, `HostUnreachableError`, `HostCommandError`; plan 03's `loadOsConfig`, `OsConfigError`, `osPaths`, `osHome`.
+- Produces:
+
+```ts
+// packages/cli/src/cli/os-host.ts (additions)
+export interface HostCheckConfig { launcher: OsConfig["launcher"]; limits: Pick<OsConfig["limits"], "launcher_hosts"> }
+export interface OsHostDeps { /* Task 16's, and */
+  loadConfig?: () => HostCheckConfig;                                    // default loadOsConfig(osPaths(osHome(env)).config)
+  hostChecker?: (config: Pick<OsConfig, "launcher">) => { checkOn(host: string, paths: string[]): Promise<HostReplies["check"]> };   // default new RemoteLauncher({ provider: new StaticHostProvider(config) })
+}
+export function formatHostCheck(header: string, report: HostReplies["check"]): { lines: string[]; missing: number; unknown: number };
+```
+
+**The operator command.** Run on the brain's machine: `swarm os host check <name> [--paths <a,b>] [--json]` asks the named host, over the same ssh path a dispatch uses, what a run there would lack, and prints it for a person. `runOsHost(["check", name], flags, deps)` is this command; `check` with no name stays the machine-to-machine op of Task 16. `--paths` is split on commas, each one absolute (else usage, 2); `--json` is on unless absent or `"false"`.
+- `name === "local"` checks the brain's own machine in process with `hostCheck({ paths }, deps)`; the header is `local: swarm <version> on <platform>`.
+- Otherwise `loadConfig()` (an `OsConfigError` prints its message to stderr, 1); no `launcher.hosts` entry of that name → stderr `no host named <name> in os.json launcher.hosts (configured: <names joined ", ", or none>)`, 2. A host missing from `limits.launcher_hosts` is still checked, after one stderr line: `<name> is not in limits.launcher_hosts: the brain will not dispatch there until it is.`
+- `hostChecker(config).checkOn(name, paths)`: a `HostUnreachableError` prints `✗ <name> (<ssh>) did not answer over ssh: <detail>` and `    fix: check that this works from the brain: ssh -o BatchMode=yes <ssh> true`, 1; a `HostCommandError` prints `✗ <name> (<ssh>) answered, but its swarm os host failed (<code>): <message>`, 1.
+- A report prints `JSON.stringify(report)` with `--json`, else `formatHostCheck("<name> (<ssh>): swarm <version> on <platform>", report).lines`: the header, then per item `  ✓ <name>: <detail>` (ok), `  ✗ <name>: <detail>` (missing) or `  ? <name>: <detail>` (unknown), each non-ok item with a fix followed by `      fix: <fix>`, and last `<missing> missing, <unknown> unknown.` or, with neither, `Everything a run needs is on <name>.` Exit 0 when nothing is missing (unknown items allowed), else 1.
+
+**The real-host test** runs only with `SWARM_OS_REMOTE_HOST=<ssh destination>` (and `SWARM_OS_REMOTE_SWARM=<the swarm binary's path on that host>` when it is not `swarm` on the session's `PATH`), against a host that has a swarm build from this branch. It calls `check` and `resources` only, never `start`, so it runs no card and changes nothing on the host. It uses the operator's own ssh setup (agent, `known_hosts`); with `BatchMode=yes`, an unknown host key fails instead of asking. It is run by a person, never by CI.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// packages/cli/tests/os-host-check.test.ts
+import { describe, it, expect } from "vitest";
+import { HostUnreachableError, HostCommandError } from "@mnmal-ai/swarm-os";
+import { runOsHost, type OsHostDeps, type ExecResult } from "../src/cli/os-host.js";
+
+const CONFIG = { launcher: { local: true, hosts: [{ name: "host-a", ssh: "owner@mac-a", swarm: "swarm" }] }, limits: { launcher_hosts: ["local"] } };
+const LISTED = { ...CONFIG, limits: { launcher_hosts: ["local", "host-a"] } };
+const REPORT = { version: "1.0.0-alpha.7", platform: "darwin", items: [
+  { name: "swarm", status: "ok" as const, detail: "1.0.0-alpha.7 (host protocol 1)", fix: null },
+  { name: "docker_daemon", status: "missing" as const, detail: "the Docker daemon is not running", fix: "start Docker, or point the project's substrate config at an already-running loopback Postgres (postgres_url without compose_file)" },
+  { name: "claude_login", status: "unknown" as const, detail: "could not tell: claude auth status is not available", fix: null },
+] };
+function cli(checkOn: (host: string, paths: string[]) => Promise<typeof REPORT>, over: OsHostDeps = {}) {
+  const out: string[] = [], err: string[] = [];
+  const deps: OsHostDeps = { out: (l) => out.push(l), err: (l) => err.push(l), loadConfig: () => CONFIG, hostChecker: () => ({ checkOn }), ...over };
+  return { out, err, run: (args: string[], flags: Record<string, string> = {}) => runOsHost(args, flags, deps) };
+}
+
+describe("swarm os host check <name>", () => {
+  it("prints what a host has and lacks, and exits 1 while something is missing", async () => {
+    const asked: Array<[string, string[]]> = [];
+    const c = cli(async (host, paths) => { asked.push([host, paths]); return REPORT; });
+    expect(await c.run(["check", "host-a"], { paths: "/path/to/project-a/.swarm" })).toBe(1);
+    expect(asked).toEqual([["host-a", ["/path/to/project-a/.swarm"]]]);
+    expect(c.out).toEqual([
+      "host-a (owner@mac-a): swarm 1.0.0-alpha.7 on darwin",
+      "  ✓ swarm: 1.0.0-alpha.7 (host protocol 1)",
+      "  ✗ docker_daemon: the Docker daemon is not running",
+      "      fix: start Docker, or point the project's substrate config at an already-running loopback Postgres (postgres_url without compose_file)",
+      "  ? claude_login: could not tell: claude auth status is not available",
+      "1 missing, 1 unknown.",
+    ]);
+    expect(c.err).toEqual(["host-a is not in limits.launcher_hosts: the brain will not dispatch there until it is."]);
+  });
+
+  it("says when a host does not answer, or answers with an error", async () => {
+    const down = cli(async () => { throw new HostUnreachableError("host-a", "ssh: connect to host mac-a port 22: Operation timed out"); }, { loadConfig: () => LISTED });
+    expect(await down.run(["check", "host-a"])).toBe(1);
+    expect(down.out).toEqual(["✗ host-a (owner@mac-a) did not answer over ssh: ssh: connect to host mac-a port 22: Operation timed out", "    fix: check that this works from the brain: ssh -o BatchMode=yes owner@mac-a true"]);
+    const broken = cli(async () => { throw new HostCommandError("host-a", "protocol", "host-a speaks host protocol 2; this brain speaks 1: run the same swarm version on both"); }, { loadConfig: () => LISTED });
+    expect(await broken.run(["check", "host-a"])).toBe(1);
+    expect(broken.out).toEqual(["✗ host-a (owner@mac-a) answered, but its swarm os host failed (protocol): host-a speaks host protocol 2; this brain speaks 1: run the same swarm version on both"]);
+  });
+
+  it("refuses an unknown host and relative paths, prints JSON on request, and says so when all is well", async () => {
+    const fine = { ...REPORT, items: [REPORT.items[0]] };
+    const c = cli(async () => fine);
+    expect(await c.run(["check", "host-z"])).toBe(2);
+    expect(c.err).toEqual(["no host named host-z in os.json launcher.hosts (configured: host-a)"]);
+    expect(await c.run(["check", "host-a"], { paths: "relative/.swarm" })).toBe(2);
+    const json = cli(async () => fine, { loadConfig: () => LISTED });
+    expect(await json.run(["check", "host-a"], { json: "true" })).toBe(0);
+    expect([JSON.parse(json.out[0]), json.err]).toEqual([fine, []]);
+    const plain = cli(async () => fine, { loadConfig: () => LISTED });
+    expect(await plain.run(["check", "host-a"])).toBe(0);
+    expect(plain.out.at(-1)).toBe("Everything a run needs is on host-a.");
+  });
+
+  it("checks the brain's own machine in process for the name local", async () => {
+    const exec = async (): Promise<ExecResult> => ({ code: 0, stdout: "v26.2.0\n", stderr: "" });
+    const c = cli(async () => { throw new Error("local is never asked over ssh"); }, { exec, platform: "linux", version: "1.0.0-alpha.7", env: { PATH: "/usr/bin" } });
+    expect(await c.run(["check", "local"])).toBe(0);
+    expect(c.out[0]).toBe("local: swarm 1.0.0-alpha.7 on linux");
+    expect(c.out).toContain("  ✓ node: v26.2.0");
+  });
+});
+```
+
+```ts
+// packages/os/tests/launcher/remote-real.test.ts
+import { describe, it, expect } from "vitest";
+import { RemoteLauncher } from "../../src/launcher/remote.js";
+import { StaticHostProvider } from "../../src/launcher/host-provider.js";
+
+const DESTINATION = process.env.SWARM_OS_REMOTE_HOST;
+
+describe.skipIf(!DESTINATION)("RemoteLauncher against a real host (SWARM_OS_REMOTE_HOST=<ssh destination>)", () => {
+  it("reads the host's check report and its resources over the system ssh, and starts nothing", async () => {
+    const swarm = process.env.SWARM_OS_REMOTE_SWARM ?? "swarm";
+    const remote = new RemoteLauncher({ provider: new StaticHostProvider({ launcher: { local: true, hosts: [{ name: "real-host", ssh: DESTINATION!, swarm }] } }) });
+    const report = await remote.checkOn("real-host", []);
+    expect(report.items.find((i) => i.name === "swarm")).toMatchObject({ status: "ok", detail: expect.stringContaining("(host protocol 1)") });
+    const snapshot = await remote.resourcesOn("real-host");
+    expect(snapshot.host).toBe("real-host");
+    expect(snapshot.cpus).toBeGreaterThan(0);
+    expect(snapshot.memTotalMb).toBeGreaterThan(0);
+  }, 120_000);
+});
+```
+
+The node detail in the `local` test is the probe's version, trimmed, as Task 16 writes it for a Node new enough (`v26.2.0`).
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cd packages/cli && npx vitest run tests/os-host-check.test.ts`
+Expected: FAIL — `check host-a` prints the usage and returns 2 (Task 16's rule for extra words).
+Run: `cd packages/os && npx vitest run tests/launcher/remote-real.test.ts`
+Expected: the suite is skipped (no `SWARM_OS_REMOTE_HOST`). It is the one test here that is not red first: it exercises Task 17's launcher against a real machine, and it is run by hand.
+
+- [ ] **Step 3: Implement** the operator command and `formatHostCheck` in `os-host.ts` to the rules above. `check` followed by one name runs it; every other extra word still prints the usage, now `usage: swarm os host <start|status|stop|resources|check|path> < request.json, or swarm os host check <name> [--paths <a,b>] [--json]`. Task 16's TTY message already points a person here.
+
+- [ ] **Step 4: Run the tests, the package gate and the CLI suite**
+
+Run: `pnpm --filter @mnmal-ai/swarm-os build && cd packages/cli && npx vitest run tests/os-host-check.test.ts tests/os-host.test.ts tests/os-remote-launch.test.ts`
+Expected: PASS (4, 8 and 1 tests). Then the package gate, `pnpm -w build` (exit 0) and `cd packages/cli && npx vitest run`. By hand, when a host is at hand (optional, never in CI): `SWARM_OS_REMOTE_HOST=owner@mac-a SWARM_OS_REMOTE_SWARM=/path/to/swarm npx vitest run tests/launcher/remote-real.test.ts` in `packages/os` passes 1 test.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/cli/src/cli/os-host.ts packages/cli/tests/os-host-check.test.ts packages/os/tests/launcher/remote-real.test.ts
+git -c commit.gpgsign=false commit -m "feat(cli): swarm os host check <name> reports what a launcher host lacks"
 ```
