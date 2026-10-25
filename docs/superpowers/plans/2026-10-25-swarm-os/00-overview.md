@@ -170,12 +170,12 @@ export function loadOsConfig(path?: string): OsConfig;      // throws OsConfigEr
 Server to client is **Server-Sent Events**; client to server is **plain HTTP**. The brain has no WebSocket. Reasons, so nobody reopens it: every command is its own authenticated request, so revocation, cool-downs and lockdown bite on the next request instead of needing sockets hunted down; step-up and refusals are HTTP status codes; reconnect and gap replay come from `Last-Event-ID`; and there is one server, one router and one auth middleware. The per-run dashboard inside `swarm run` keeps its existing `ws` server; nothing here touches it.
 
 **Auth.**
-- Browser (the dashboard): the passkey login sets a cookie `swarm_os_session` (`HttpOnly; SameSite=Strict; Path=/; Secure` unless `bind.host` is loopback and `public_url` is `http:`). Every state-changing route (`POST`, `PUT`, `DELETE` under `/api`) requires the header `X-Swarm-Os: 1`; CORS allows only the `public_url` origin, so the custom header is the CSRF guard. `GET /api/stream` works with the cookie, which `EventSource` sends same-origin.
+- Browser (the dashboard): the passkey login sets a cookie `swarm_os_session` (`HttpOnly; SameSite=Strict; Path=/; Secure` unless `bind.host` is loopback and `public_url` is `http:`). Every cookie-authenticated state-changing request (`POST`, `PUT`, `DELETE` under `/api`) requires the header `X-Swarm-Os: 1`; bearer-authenticated callers are exempt. CORS allows only the `public_url` origin, so the custom header is the CSRF guard. `GET /api/stream` works with the cookie, which `EventSource` sends same-origin.
 - Everything else (TUI, `swarm os …`, instances, room tools): `Authorization: Bearer <token>` with the prefixes `sess_`, `inst_`, `room_`, or the host secret as `host_`; streams are read with a streaming `fetch` through `openEventStream` (below).
 - `requireAuth(kind)` accepts cookie or bearer and sets `req.actor`.
 
 **Streams** (`text/event-stream`, `retry: 3000`, a `: keepalive` comment every 15 s, every event carries `id: <eventSeq>` from one monotonic per-brain sequence, `event: <type>`, `data: <json>`):
-- `GET /api/stream?rooms=all|<id>,<id>` (human session or host). First event `hello { actor, rooms: RoomRow[], instances: InstanceRow[], resources: ResourceSnapshot | null, cooldownUntil?, lockdown: boolean }`, then `message { message: MessageRow }`, `instance { instance: InstanceRow }`, `decision { decision: DispatchDecisionRow }`, `question { question: QuestionRow }`, `resources { snapshot }`, `stepup { stepUpId, command: string[], expiresAt }` (sent only to confirmer devices and the host), `cooldown { cooldownUntil }`, `lockdown { active }`. On reconnect with `Last-Event-ID` the hub replays the events after that id that the actor may see, from a ring buffer of the last 10,000; an id older than the buffer gets `event: gap {}` and the client refills rooms from REST by `seq`.
+- `GET /api/stream?rooms=all|<id>,<id>` (human session or host). First event `hello { actor, rooms: RoomRow[], instances: InstanceRow[], resources: ResourceSnapshot | null, cooldownUntil?, lockdown: boolean }`, then `message { message: MessageRow }`, `instance { instance: InstanceRow }`, `decision { decision: DispatchDecisionRow }`, `question { question: QuestionRow }`, `resources { snapshot }`, `stepup { stepUpId, command: string[], expiresAt, code }` (sent only to the host and to confirmer devices other than the one that issued the command), `cooldown { cooldownUntil }`, `lockdown { active }`. On reconnect with `Last-Event-ID` the hub replays the events after that id that the actor may see, from a ring buffer of the last 10,000; an id older than the buffer gets `event: gap {}` and the client refills rooms from REST by `seq`.
 - `GET /api/instances/:id/stream` (instance token): `hello {}`, then `command { argv: string[] }` (`["pause"]`, `["stop", "graceful" | "immediate"]`, `["answer", questionId, body]`), same keepalive and replay rules.
 - Visibility is applied at publish time: `EventHub.publish(visibleTo: (actor: Actor) => boolean, event: { type: string; payload: unknown })`. Messaging, dispatch and resources publish through it; nothing else writes to the streams.
 
@@ -340,7 +340,7 @@ export class Lockdown { engage(by: Actor): Promise<void>; release(by: Actor & { 
 
 ### Test doubles (shared, plan 02 and 04 create them; everyone uses them)
 
-`packages/os/src/testing/index.ts` exports `MemoryOsStore`, `FakeEventHub` (records published events and lets a test attach a fake actor), `FakeLauncher` (records specs; `status` scripted), `FakeBoardClient` (cards set by the test; `emit(ref)` simulates a webhook), `FakeClock` (`now()`, `advance(ms)`), `FakePush` (records sends), `FakeSdk` (scripted chief-of-staff turns and tool calls), `makeConfig(overrides)`. Plan 05's `Messaging` tests, plan 06's chief-of-staff tests and plan 09's red-team tests run entirely on these; the only tests that touch Postgres or the Agent SDK are in `tests/integration/os-*.test.ts`, gated by `SWARM_SDK_E2E=1`.
+`packages/os/src/testing/index.ts` exports `MemoryOsStore`, `FakeEventHub` (plan 03; records published events and lets a test attach a fake actor), `FakeLauncher` (records specs; `status` scripted), `FakeBoardClient` (cards set by the test; `emit(ref)` simulates a webhook), `FakeClock` (`now()`, `advance(ms)`), `FakePush` (records sends), `FakeSdk` (scripted chief-of-staff turns and tool calls), `makeConfig(overrides)`. Plan 05's `Messaging` tests, plan 06's chief-of-staff tests and plan 09's red-team tests run entirely on these; the only tests that touch Postgres or the Agent SDK are in `tests/integration/os-*.test.ts`, gated by `SWARM_SDK_E2E=1`.
 
 ### Logging
 
@@ -351,3 +351,63 @@ export class Lockdown { engage(by: Actor): Promise<void>; release(by: Actor & { 
 - Each plan is a separate SDD run with its own ledger; the shared workspace is `.superpowers/sdd/<plan-file-stem>/`.
 - Run the package's own tests after every task, and `pnpm -w build` at the end of every plan; a plan is done when the CLI suite, the new package's suite and the build are green.
 - The first proof (plan 09's last task) is run by a person on the host, never by CI.
+
+## Contract additions and rulings from the plan reports (2026-10-25)
+
+The plans were written in parallel against the contracts above; their reports added the following, which now bind every plan. Where a plan's text and this section disagree, this section wins, and the executor fixes the plan text in place as a ruling.
+
+**Transport and API**
+- Plan 03 owns `packages/os/src/sse/` (`EventHub`, `openEventStream`, `parseSse`) and the file `packages/os/src/security/refusals.ts` (`RefusalCode`, `REFUSAL_STATUS`, `refuse`, `refusalCode`, `GateRefusedError`); plan 09 extends it. `stepup_failed` → 403.
+- `hello` carries `stepUps?: Array<{ stepUpId, command, expiresAt, code }>` for the host and confirmer devices (excluding the issuing device); the `stepup` event carries `code` with the same audience. The issuing device sees only the 428.
+- `X-Swarm-Os: 1` is required only on cookie-authenticated state-changing requests; bearer callers are exempt.
+- `Actor.address` comes from `X-Forwarded-For` only when the TCP peer is loopback (Tailscale Serve, a local reverse proxy); otherwise the peer address.
+- Event ids persist across restarts (`<os_home>/event-seq`), so `Last-Event-ID` replay survives a restart within the ring buffer.
+- `GET /api/commands` → `Array<{ name, kind, summary }>` (plan 05). `GET /api/me` includes `vapidPublic`. `GET /health` includes `webhooksRejected` and `store: !store.degraded`.
+- CLI login (plan 08, `packages/os/src/api/cli-login.ts`): `GET /api/auth/cli/:nonce` polled with `X-Swarm-Os-Poll`, `POST /api/auth/cli/:nonce/approve` from a signed-in dashboard (`/#cli-login=<nonce>` screen, plan 07); plan 03 exports `issueSession({ humanId, deviceId, address, client })` and its `cli-login` module calls `mountCliLogin(api, new CliLogins({ store, messaging, clock, publicUrl, issueSession }))` (plan 08's signature).
+- Later-device enrolment: `POST /api/auth/register/options` → `202 { enrolmentId, state: "pending" }`, `403`, `410`; approval is the standing command `devices approve <enrolmentId>`; a pending enrolment is a `system` message in the system room (`dataJson { enrolmentId, deviceName, requestedAt, state }`), no new store type. `swarm os init` prints `<public_url>/#enrol=<code>` (15-minute, single-use).
+- The executor is `execute(ctx, argv, stepup?: { stepUpId, code })`. `POST /api/commands { room, argv, stepUpId?, code? }`.
+- Plan 03 also adds `GET /api/stepup/pending` (host and confirmers), `POST /api/lockdown` (host only, immediate) and `POST /api/lockdown/release` (standing), `410 gone` for an expired API object, and accepts `{ stepUpId, code }` inline on `POST /api/auth/devices/:id/revoke`. An expired step-up code is a `stepup_failed` and counts like a wrong one. `EventHub` additionally offers `validate`, `seqFile`, `closeWhere`, `closeAll`, `latestId`, `flush`; `EventPublisher = Pick<EventHub, "publish">`.
+- Brain modules are discovered as `*BrainModule` exports from `packages/os/src/index.ts` in `MODULE_ORDER` (`messaging`, `dispatch`, `cos`, `web`, `cli-login`, `security`), with built-in fallbacks for `cos`, `web` and `cli-login` when a plan has not landed; later plans export `dispatchBrainModule`, `messagingBrainModule` and may export `cosBrainModule`.
+
+**Store and config**
+- Substrate stamps `createdAt` itself: those fields are declared `field.date({ nullable: true })` and read from row metadata; row types keep `createdAt: string`. Row ids are client-chosen `<kind>-<ulid>`.
+- `Instance` gains `phase` and `currentTask` (nullable strings, from heartbeats); `GET /api/instances` adds `projectName` from the registration. `Device` gains `pushSubscriptionJson`.
+- `DispatchDecision.checksJson` is always a JSON array of `CheckResult`.
+- One `cos` room (`kind: "cos"`, `subjectId: null`) whose members are the owners; `cosRoom()` returns it.
+- `os.json`: `cos.readiness_model?` (default `cos.model`), `boards.trello.secret?` (webhook signing; per-board `Board.webhookSecret` as fallback), default `os_stack.postgres_url` database is `swarm` (what the compose template creates). The plugin dir is the stack dir `~/.swarm/substrate/stacks/<compose_project>-cold`; `os_home` holds `os.json`, `host.secret`, `event-seq`, `journal/`, `instances/`, logs.
+- `journaledStore(...)` returns `JournaledOsStore` with `replay(): Promise<ReplayReport>` and `degraded`; the brain never has a second replayer. `ensureOsStack` uses `ensureDedicatedPostgres` + `ensureAllSidecars({ specs: [osSpec] })` + `ensureTypesRegistered` and never writes `process.env`; `SidecarSpec.scope` gains `"os"`, `DedicatedPostgres` gains `services`.
+- `Clock`/`systemClock` live in `packages/os/src/clock.ts`; `CardRef`/`cardKey` in `packages/os/src/store/ids.ts`; `redactSecrets` is exported from the package root.
+
+**Run attachment (plan 01)**
+- Wire types live in `packages/types/src/os-protocol.ts`: attach response `{ roomId, participantId, roomToken }`, heartbeat `dashboardUrl?`, `RunExitReason`, exit `message?`, `QuestionStatus` (with `proceededSource`), `send { to? }`, `read?from=`, the synthetic `os:events_dropped` event. Plans 04 and 05 import them.
+- The launcher sets `SWARM_OS_INSTANCE_ID` and, for a dispatch that answers an ask, `SWARM_OS_CONTEXT` (≤ 8 KB, appended to the goal under "Context from the owner:").
+- The room MCP server is started with `swarmSelfCommand()` (the Bun binary is its own `execPath`); `room-mcp`, `os` and `top` are early returns in `main.ts` before the Substrate bootstrap, never switch cases.
+- Five session timers are suspended while a question is open (the three named in the spec plus the per-task timeout in `dispatchParallel` and the escalation watcher's timeout).
+- With `--os`, an expired login reports `exit { reason: "login_expired" }` and leaves the card in place. Attach 401/403 ends the attachment; the run continues alone and says so once.
+- `packages/cli` depends on `packages/os`; `packages/os` never imports `packages/cli`. The root import of `@mnmal-ai/swarm-os` has no side effects.
+
+**Dispatch and chief of staff**
+- `Dispatcher.onDecision(listener: (decision, event, { quiet, repeat }) => void): () => void`; the chief of staff narrates only non-quiet, non-repeat decisions and does not narrate what the dispatcher already posts as `event`/`system`.
+- `ask_first` is enforced in `Readiness.assess` (a would-be dispatch becomes `ask`), not after the fact.
+- A project at its `max_instances` is a quiet `hold` under `not_in_flight`, not a refusal. `resources` also refuses on `registrable_roots`, `tokens_per_day`, a down store and lockdown.
+- The chief of staff runs a fresh Agent SDK session per turn (`persistSession: false`); continuity is the room log plus `Memory` rows. Its readiness turns use `cos.readiness_model`. Commands it runs carry the owner message's `sessionId`, `deviceId` and `address` in provenance.
+- A late answer that contradicts what a worker did becomes a follow-up post in the board's room (and the cos room), not a card: board clients only read in this version.
+- `Precedent.lookup` returns `precedent.md` filled with the matching answer's body and its source, or null.
+
+**Commands**
+- `CommandSpec.args` is a `z.object` keyed by the positional words in declaration order; `--key value` and `--flag` fill named keys; a trailing `z.array(z.string())` key takes the rest; `argvToArgs(spec, rest)` (`packages/os/src/commands/argv-args.ts`, plan 08, written by plan 05 if absent) performs the conversion; `run(ctx, args)` receives the object. Command examples are positional: `/dispatch board-a 42`, not `board:<name>`.
+- `register`, `unregister`, `set ask_first`, `set limits` are plan 08's (`packages/os/src/commands/registrations.ts`), handed to the brain with the CLI-backed commands through `Brain.start(config, { modules, commands })`; plan 03 registers only `devices revoke`, `devices approve`, `lockdown`, `lockdown release`.
+- Standing commands need a step-up from every actor, the host included (a two-step "are you sure" on the host). The one exception: `lockdown` (engage) is an operating, host-only command and runs at once; `lockdown release` is standing.
+- The executor announces a standing command sent without a code (owners notified, no count); only wrong or expired codes count, and two within ten minutes cool the session. Review Focus item 4 reads that way now.
+- Deferred, as a later task group in plan 08 (not in the first version): `substrate start`, `db setup|status|start|stop`, `list`, `grade-data`, `sharing`, `drainstop` as commands; `init`, `add` and `dashboard` are excluded because they need a working directory or a terminal. Refused from rooms by design: `sync --force`, `skill add` of a path outside the project, and the `--swarm-path`, `--repo-path`, `--dir`, `--yes` flags.
+
+**Modules**
+- `BrainModule { name; start(ctx: BrainContext); stop() }` and `BrainContext { config; store; api; hub; clock; log; periodic(name, everyMs, fn); registerCommands(specs) }` (plan 03, `packages/os/src/brain/module.ts`); plans 04, 05 and 06 adapt to it. The brain starts modules in order after the routes exist and stops them in reverse; the chief of staff is wired as the dispatcher's readiness and the question-expiry precedent, and falls back to `StaticReadiness` with a system-room notice when it cannot start.
+
+**Ownership changes**
+- Plan 02 also touches: `packages/substrate-shared` (constants, index), the plugin's `bootstrap.ts`, `onboard.ts`, `index.ts`, `config.schema.json`, `packages/substrate/src/lifecycle/{specs,stacks,ready,postgres}.ts`, `turbo.json`, `tests/integration/package.json`, `tests/integration/os-store.test.ts`, `CLAUDE.md`, `AGENTS.md`.
+- Plan 01 also touches `packages/cli/src/cli/merge-command.ts`, `packages/cli/src/server/index.ts` (export `redactToolPayload`), `packages/cli/tsconfig.json`, `packages/types/src/os-protocol.ts`, `packages/cli/src/cli/room-client.ts`.
+- Plan 05 owns `packages/os/src/commands/gate.ts` until plan 09 replaces it with re-exports; plan 09 owns `tests/integration/os-harness.ts` and the final `tripwires.ts`.
+- Plan 07 adds `scripts/gen-web-manifest.mjs`, the generated embed manifest, a `prebuild` in `packages/os/package.json`, one `await registerStatic(api)` line in plan 03's composition root, and `.gitignore` entries.
+- Plan 08 adds `packages/os/src/api/cli-login.ts`, `packages/os/src/commands/{argv-args,registrations}.ts`, `packages/cli/src/cli/sync.ts` (sync moves out of `main.ts`), and one guard line in `packages/cli/src/cli/os.ts`.
+
