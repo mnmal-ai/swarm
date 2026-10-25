@@ -49,7 +49,7 @@ The run itself does not change. `swarm run` is what the brain dispatches.
   board webhooks ──┐                                  ┌── chat (web app, push)
   board polling ───┤                                  ├── TUI (swarm top)
                    ▼                                  ├── CLI (swarm os …)
-            ┌─────────────┐   HTTP + WebSocket API    │
+            ┌─────────────┐   HTTP API + event streams│
             │    brain    │◄─────────────────────────┘
             │  swarm os   │
             └──┬──────┬───┘
@@ -60,11 +60,11 @@ The run itself does not change. `swarm run` is what the brain dispatches.
       └── …   each instance: heartbeat + events + messages → brain
 ```
 
-**One API.** The brain exposes one HTTP and WebSocket API. The chat, the TUI and the `swarm os` CLI subcommands are three clients of it and have no other way in. An instance also talks to the brain only through this API (a token per instance), so a remote instance is no different from a local one.
+**One API.** The brain exposes one HTTP API: plain requests up, server-sent event streams down, and no WebSocket. A command is one authenticated request, so a revoked session, a cool-down or a lockdown takes effect on the very next request rather than on a socket that has to be found and closed; a refusal is a status code; and a dropped stream resumes from its last event id. The chat, the TUI and the `swarm os` CLI subcommands are three clients of it and have no other way in. An instance also talks to the brain only through this API (a token per instance), so a remote instance is no different from a local one.
 
 **One store.** The brain's own state lives in Substrate, in a dedicated stack the brain owns (the "OS stack"), in new types under a `swarm-os` namespace: `Board`, `Registration`, `Instance`, `Room`, `Participant`, `Message`, `Decision`, `Resource`. Per-project stacks are untouched and stay `local_only` where they are today. Nothing the brain stores is needed to re-derive a run; a run's own record stays in its project's stack as it does now.
 
-**Processes.** The brain is one Node process built from swarm's existing packages, run under a supervisor (launchd on a Mac, systemd or a container restart policy on a server). Instances are child processes of the local launcher or remote processes of the remote launcher. The chat is static files served by the brain plus a service worker for push. The TUI is `swarm top`, a terminal client of the same WebSocket.
+**Processes.** The brain is one Node process built from swarm's existing packages, run under a supervisor (launchd on a Mac, systemd or a container restart policy on a server). Instances are child processes of the local launcher or remote processes of the remote launcher. The chat is static files served by the brain plus a service worker for push. The TUI is `swarm top`, a terminal client of the same event stream.
 
 ## The chief of staff
 
@@ -118,7 +118,7 @@ The **launcher** interface is small: `start(spec) → handle`, `status(handle)`,
 
 The messaging space is the operating system's bus, not an add-on.
 
-**Model.** `Room { id, kind: system | board | instance | direct, members }`, `Participant { id, kind: human | brain | worker | reviewer | arbiter | instance, name, permissions }`, `Message { id, room, from, at, kind: text | command | question | answer | event | file, body, reply_to, visibility }`. Messages are rows in the OS stack; delivery is over the brain's WebSocket to connected clients and over Web Push to phones.
+**Model.** `Room { id, kind: system | board | instance | direct, members }`, `Participant { id, kind: human | brain | worker | reviewer | arbiter | instance, name, permissions }`, `Message { id, room, from, at, kind: text | command | question | answer | event | file, body, reply_to, visibility }`. Messages are rows in the OS stack; delivery is over the brain's event streams to connected clients and over Web Push to phones.
 
 **Rooms are created with their subject.** An instance's room opens when it is dispatched and holds every participant of that run: the instance itself (for commands), each worker, reviewer and arbiter session as it starts, and any human who joins. A board's room holds the brain and the board's owners. The system room holds the brain and the OS owners. Direct rooms open on first message.
 
@@ -143,7 +143,7 @@ The launcher reports a `Resource` snapshot every heartbeat: CPU and memory in us
 ## Clients
 
 - **Dashboard (web app).** The chief of staff's chat in the middle, the resource line and active instances at the top, every room down the side as channels (boards, live instances, past instances, direct), a command bar at the bottom with completion for the command set. Installs to a phone's home screen, receives push. Passkey login for humans; one owner is bootstrapped on first `swarm os init`.
-- **TUI (`swarm top`).** The same WebSocket, rendered in the terminal with the same layout: the chief of staff's chat in the main pane, resources and instances above, rooms in a side list, a command line. The existing per-run dashboard stays as it is and is linked from the instance's line, since an instance still serves it on its own port.
+- **TUI (`swarm top`).** The same event stream, rendered in the terminal with the same layout: the chief of staff's chat in the main pane, resources and instances above, rooms in a side list, a command line. The existing per-run dashboard stays as it is and is linked from the instance's line, since an instance still serves it on its own port.
 - **CLI.** `swarm os init | start | stop | status | register | unregister | dispatch | hold | override | top | say`. Each is a command message sent to the brain's API and the reply printed.
 
 ## Reliability: it does not go down
@@ -203,7 +203,7 @@ Webhooks, the remote launcher, worker-to-worker messaging, the TUI beyond a stat
 
 ## Left to the builder
 
-- The WebSocket protocol between clients and brain, and between instance and brain, as long as both are one protocol.
+- The event stream's framing between clients and brain, and between instance and brain, as long as both are one protocol.
 - The journal's format.
 - How `--card` is threaded through the task sources (one method on `ExternalTaskSource`).
 - The chat's visual design, beyond the layout above.
@@ -231,3 +231,4 @@ Marked as mine, for the owner to check:
 - A local write-ahead journal covers the OS stack being down; it is replayed, never read.
 - The brain has thin board clients of its own (Trello and GitHub APIs) rather than reusing the project-CLI task sources, because `swarm run` reads Trello only through a project's own CLI.
 - Limits live in a file on the host and nothing in the API can change them; standing commands need a code shown only on the host or a second device; prompts come from the repository, never the store.
+- Server-sent events down and HTTP up, instead of a WebSocket, so that every command is its own authenticated request and revocation is immediate; the per-run dashboard inside `swarm run` keeps its WebSocket as it is.

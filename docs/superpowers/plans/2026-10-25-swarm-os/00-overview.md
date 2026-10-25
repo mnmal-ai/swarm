@@ -6,7 +6,7 @@
 
 **Architecture:** One new package, `packages/os` (`@mnmal-ai/swarm-os`), holds the brain: store, journal, ingress, dispatch, launcher, messaging, commands, auth, API and the chief of staff. `swarm run` gains three things (`--card`, per-card checkpoints, `--os` attachment with a room MCP server for its sessions). The dashboard is a second new package, `packages/os-web`, built with Vite and embedded in the binary. The TUI and the `swarm os …` subcommands live in `packages/cli` as thin clients of the brain's API. The brain's own state is Substrate rows in a `swarm-os` namespace served by the existing plugin on a dedicated stack the brain owns.
 
-**Tech Stack:** TypeScript (ESM, `.js` import suffixes, `module: Node18`), pnpm + turbo, vitest, Bun-compiled binary, `ws`, `zod`, `@anthropic-ai/claude-agent-sdk` (`query`, `tool`, `createSdkMcpServer`), `@modelcontextprotocol/sdk` (stdio server for sessions), `@simplewebauthn/server` + `@simplewebauthn/browser` (passkeys), `web-push` (VAPID push), Vite + React 18 (dashboard, as `dashboard/` already uses), Substrate `@mnmal-ai/substrate/sdk` (`defineNamespace`, `field`).
+**Tech Stack:** TypeScript (ESM, `.js` import suffixes, `module: Node18`), pnpm + turbo, vitest, Bun-compiled binary, node `http` with Server-Sent Events (no WebSocket in the brain), `zod`, `@anthropic-ai/claude-agent-sdk` (`query`, `tool`, `createSdkMcpServer`), `@modelcontextprotocol/sdk` (stdio server for sessions), `@simplewebauthn/server` + `@simplewebauthn/browser` (passkeys), `web-push` (VAPID push), Vite + React 18 (dashboard, as `dashboard/` already uses), Substrate `@mnmal-ai/substrate/sdk` (`defineNamespace`, `field`).
 
 **Spec:** `docs/superpowers/specs/2026-10-25-swarm-os-design.md` (approved 2026-10-25, with the threat-model section). Every plan argues from it; where a plan and the spec disagree, the spec wins.
 
@@ -14,17 +14,17 @@
 
 | # | Plan | Package(s) | Produces | Depends on |
 |---|------|-----------|----------|------------|
-| 01 | `01-run-attach.md` | cli, task-backends, worker-backends, orchestrator | `swarm run --card`, per-card checkpoints, `--os`/`--os-token` attachment, `swarm room-mcp`, question gate that suspends the three session timers | nothing (ships behind flags) |
+| 01 | `01-run-attach.md` | cli, task-backends, worker-backends, orchestrator | `swarm run --card`, per-card checkpoints, `--os`/`--os-token` attachment, `swarm room-mcp`, question gate that suspends the three session timers | 03 (`openEventStream` only; ships behind flags) |
 | 02 | `02-os-store.md` | substrate-plugin, os | `swarm-os` namespace types, `OsStore` + `SubstrateOsStore` + `MemoryOsStore`, write-ahead `Journal`, OS stack lifecycle (`ensureOsStack`) | nothing |
-| 03 | `03-brain-core.md` | os, cli | `os.json` config, `Brain` (daemon lifecycle, reconcile on start, health), HTTP + WS `Api`, auth (passkeys, sessions, devices, instance tokens, step-up codes), `swarm os init\|start\|stop\|status\|install\|lockdown\|confirm` | 02 |
+| 03 | `03-brain-core.md` | os, cli | `os.json` config, `Brain` (daemon lifecycle, reconcile on start, health), HTTP `Api` with the SSE `EventHub` and the shared SSE client, auth (passkeys, cookie sessions, devices, instance tokens, step-up codes), `swarm os init\|start\|stop\|status\|install\|lockdown\|confirm` | 02 |
 | 04 | `04-ingress-dispatch.md` | os | `BoardClient` (Trello API, GitHub API, fake), `Poller`, webhooks, `Dispatcher` (policy chain, draining, holds, asks), `Launcher` (local, fake), `Resources`, instance lifecycle (heartbeats, dead, paused, retry, login_expired) | 02, 03 |
-| 05 | `05-messaging.md` | os | rooms, participants, messages, delivery (WS fan-out, Web Push), `CommandRegistry` + parser + executor (authority, step-up, audit, tripwires), room tokens for sessions | 02, 03 |
+| 05 | `05-messaging.md` | os | rooms, participants, messages, delivery (SSE fan-out, Web Push), `CommandRegistry` + parser + executor (authority, step-up, audit, tripwires), room tokens for sessions | 02, 03 |
 | 06 | `06-chief-of-staff.md` | os | the chief-of-staff agent (Agent SDK session with the command set as tools), memory, standing orders, readiness check, act / `ask_first`, system prompts from files, provenance envelope, injection corpus tests | 04, 05 |
 | 07 | `07-dashboard-web.md` | os-web, os | the PWA: passkey login, device enrolment, chat with the chief of staff, channels, instances and resources, command bar, push subscription, service worker; embedding into the binary | 03, 05 |
 | 08 | `08-tui-cli.md` | cli, os | `swarm top` TUI, `swarm os register\|unregister\|dispatch\|hold\|override\|retry\|pause\|resume\|say\|top`, and the CLI-as-functions refactor that makes `merge`, `sync`, `db`, `substrate`, `skill`, `mcp`, `logs`, `upgrade` callable from the command registry | 03, 05 |
 | 09 | `09-security-resilience.md` | os, tests/integration | the identity-compromise controls end to end (limits on disk, step-up for standing commands, device enrolment approval, session revocation, tripwires, lockdown), the red-team corpus, the kill tests (brain, Substrate, instance), the first-proof acceptance script | all |
 
-Order of execution: 02, 01 and 03 may proceed in parallel after 02's types land; then 04 and 05 in parallel; then 06, 07, 08 in parallel; 09 last. A plan never edits a file another plan owns (see **File ownership**).
+Order of execution: 02, then 03; then 01, 04 and 05 in parallel; then 06, 07, 08 in parallel; 09 last. A plan never edits a file another plan owns (see **File ownership**).
 
 ## Global Constraints
 
@@ -59,7 +59,7 @@ Input classes the spec implies but no single task's tests exercise, most likely 
 |------|-----------|
 | `packages/cli/src/cli/run.ts`, `packages/cli/src/cli/os-attach.ts`, `packages/cli/src/cli/room-mcp.ts`, `packages/cli/src/cli/question-gate.ts`, `packages/cli/src/cli/tool-wedge-watcher.ts`, `packages/task-backends/src/*`, `packages/worker-backends/src/claude-code.ts`, `packages/orchestrator/src/orchestrator/index.ts`, `packages/types/src/*` (additive only) | 01 |
 | `packages/substrate-plugin/src/types/os-types.ts`, `packages/substrate-plugin/src/namespaces.ts`, `packages/substrate-plugin/src/plugin.ts` (scope `os`), `packages/os/src/store/*`, `packages/os/src/journal/*`, `packages/os/src/stack/*`, `packages/os/package.json`, `packages/os/tsconfig.json`, `packages/os/vitest.config.ts` | 02 |
-| `packages/os/src/config/*`, `packages/os/src/brain/*`, `packages/os/src/api/*`, `packages/os/src/auth/*`, `packages/os/src/supervisor/*`, `packages/cli/src/cli/os.ts` (daemon-control subcommands), `packages/cli/src/cli/main.ts` (the `os`, `top`, `room-mcp` cases only) | 03 |
+| `packages/os/src/config/*`, `packages/os/src/brain/*`, `packages/os/src/api/*`, `packages/os/src/sse/*`, `packages/os/src/auth/*`, `packages/os/src/supervisor/*`, `packages/cli/src/cli/os.ts` (daemon-control subcommands), `packages/cli/src/cli/main.ts` (the `os`, `top`, `room-mcp` cases only) | 03 |
 | `packages/os/src/ingress/*`, `packages/os/src/dispatch/*`, `packages/os/src/launcher/*`, `packages/os/src/resources/*` | 04 |
 | `packages/os/src/messaging/*`, `packages/os/src/commands/*`, `packages/os/src/push/*` | 05 |
 | `packages/os/src/cos/*`, `packages/os/prompts/*`, `packages/os/src/cos/__fixtures__/injection/*` | 06 |
@@ -165,41 +165,66 @@ export type OsConfig = z.infer<typeof OsConfigSchema>;
 export function loadOsConfig(path?: string): OsConfig;      // throws OsConfigError with the zod issues joined
 ```
 
-### Brain API (plan 03 defines the server, plans 04 to 08 add routes and frames)
+### Transport (decided 2026-10-25): SSE down, HTTP up
 
-Base: `http(s)://<bind>`; JSON bodies; errors `{ error: { code: string; message: string } }` with HTTP 400/401/403/404/409/429/503. Auth is a bearer token: a human session token (`Authorization: Bearer sess_…`), an instance token (`Bearer inst_…`) or a room token (`Bearer room_…`); `requireAuth(kind)` middleware in `packages/os/src/api/auth-middleware.ts` sets `req.actor: Actor` where
+Server to client is **Server-Sent Events**; client to server is **plain HTTP**. The brain has no WebSocket. Reasons, so nobody reopens it: every command is its own authenticated request, so revocation, cool-downs and lockdown bite on the next request instead of needing sockets hunted down; step-up and refusals are HTTP status codes; reconnect and gap replay come from `Last-Event-ID`; and there is one server, one router and one auth middleware. The per-run dashboard inside `swarm run` keeps its existing `ws` server; nothing here touches it.
+
+**Auth.**
+- Browser (the dashboard): the passkey login sets a cookie `swarm_os_session` (`HttpOnly; SameSite=Strict; Path=/; Secure` unless `bind.host` is loopback and `public_url` is `http:`). Every state-changing route (`POST`, `PUT`, `DELETE` under `/api`) requires the header `X-Swarm-Os: 1`; CORS allows only the `public_url` origin, so the custom header is the CSRF guard. `GET /api/stream` works with the cookie, which `EventSource` sends same-origin.
+- Everything else (TUI, `swarm os …`, instances, room tools): `Authorization: Bearer <token>` with the prefixes `sess_`, `inst_`, `room_`, or the host secret as `host_`; streams are read with a streaming `fetch` through `openEventStream` (below).
+- `requireAuth(kind)` accepts cookie or bearer and sets `req.actor`.
+
+**Streams** (`text/event-stream`, `retry: 3000`, a `: keepalive` comment every 15 s, every event carries `id: <eventSeq>` from one monotonic per-brain sequence, `event: <type>`, `data: <json>`):
+- `GET /api/stream?rooms=all|<id>,<id>` (human session or host). First event `hello { actor, rooms: RoomRow[], instances: InstanceRow[], resources: ResourceSnapshot | null, cooldownUntil?, lockdown: boolean }`, then `message { message: MessageRow }`, `instance { instance: InstanceRow }`, `decision { decision: DispatchDecisionRow }`, `question { question: QuestionRow }`, `resources { snapshot }`, `stepup { stepUpId, command: string[], expiresAt }` (sent only to confirmer devices and the host), `cooldown { cooldownUntil }`, `lockdown { active }`. On reconnect with `Last-Event-ID` the hub replays the events after that id that the actor may see, from a ring buffer of the last 10,000; an id older than the buffer gets `event: gap {}` and the client refills rooms from REST by `seq`.
+- `GET /api/instances/:id/stream` (instance token): `hello {}`, then `command { argv: string[] }` (`["pause"]`, `["stop", "graceful" | "immediate"]`, `["answer", questionId, body]`), same keepalive and replay rules.
+- Visibility is applied at publish time: `EventHub.publish(visibleTo: (actor: Actor) => boolean, event: { type: string; payload: unknown })`. Messaging, dispatch and resources publish through it; nothing else writes to the streams.
 
 ```ts
-export type Actor = { kind: "human"; humanId: string; sessionId: string; deviceId: string; address: string }
+// packages/os/src/sse/hub.ts (plan 03)
+export interface HubEvent { id: number; type: string; payload: unknown; visibleTo: (actor: Actor) => boolean }
+export class EventHub {
+  constructor(opts?: { ringSize?: number; keepaliveMs?: number; clock?: Clock });
+  attach(req: IncomingMessage, res: ServerResponse, actor: Actor, opts: { rooms: string[] | "all"; lastEventId?: number; hello: () => Promise<unknown> }): () => void;   // writes headers, hello, replay, then live events; returns detach
+  publish(visibleTo: HubEvent["visibleTo"], event: { type: string; payload: unknown }): HubEvent;
+  replayAfter(id: number, actor: Actor): HubEvent[] | "gap";
+}
+// packages/os/src/sse/client.ts (plan 03; used by the TUI, the `swarm run` attachment and tests)
+export interface EventStreamHandle { close(): void; readonly lastEventId: number | null }
+export function openEventStream(url: string, opts: { headers: Record<string, string>; lastEventId?: number; onEvent: (e: { id: number | null; type: string; data: unknown }) => void; onOpen?: () => void; onError?: (err: Error) => void; fetchImpl?: typeof fetch; backoffMs?: [number, number] }): EventStreamHandle;   // reconnects with Last-Event-ID; exponential backoff between backoffMs[0] and backoffMs[1] (default 1 s to 30 s)
+export function parseSse(chunk: string, state: SseParseState): { events: Array<{ id: number | null; type: string; data: string }>; state: SseParseState };   // pure, tested on split chunks
+```
+
+### Brain API (plan 03 defines the server, plans 04 to 08 add routes)
+
+Base: `http(s)://<bind>`; JSON bodies; errors `{ error: { code: string; message: string; [extra]: unknown } }`. Status codes are the contract: `400 bad_request`, `401 unauthenticated`, `403 forbidden | provenance_mismatch | lockdown`, `404 not_found`, `409 conflict`, `428 stepup_required` (with `stepUpId`), `429 cooldown` (with `cooldownUntil`) or `429 limit` (with `limit`), `503 store_unavailable`. `POST /api/commands` and `POST /api/rooms/:id/messages` accept an `Idempotency-Key` header; a repeated key within 10 minutes returns the first result.
+
+```ts
+export type Actor = { kind: "human"; humanId: string; sessionId: string; deviceId: string; address: string; confirmer: boolean }
                   | { kind: "instance"; instanceId: string }
                   | { kind: "room"; instanceId: string; participantId: string; roomId: string }
-                  | { kind: "cos" } | { kind: "host" };   // host: a loopback caller holding the host secret from os_home/host.secret
+                  | { kind: "cos" } | { kind: "host" };   // host: a loopback caller presenting os_home/host.secret as `Bearer host_<secret>`
 ```
 
 Routes (plan in brackets):
 
 - `GET /health` → `{ ok, store: boolean, launcher: boolean, instances: number, uptimeSeconds }` [03]
-- Passkeys: `POST /api/auth/register/options`, `POST /api/auth/register/verify`, `POST /api/auth/login/options`, `POST /api/auth/login/verify` → `{ token, expiresAt, humanId, deviceId }` [03]; `POST /api/auth/logout`; `POST /api/auth/devices/:id/revoke` (standing) [03]
-- Step-up: `POST /api/stepup/confirm { code }` (host or confirmer device) [03]
-- `GET /api/me` → `{ humanId, name, deviceId, confirmer }` [03]
-- Rooms & messages: `GET /api/rooms`, `GET /api/rooms/:id/messages?beforeSeq&limit`, `POST /api/rooms/:id/messages { kind: "text" | "answer", body, replyTo? }` [05]
-- Commands: `POST /api/commands { room, argv: string[], stepup?: string }` → `CommandResult` [05]
-- Instances: `GET /api/instances`, `GET /api/instances/:id` [04]; instance-authenticated: `POST /api/instances/:id/attach { runId, dashboardUrl, pid }`, `POST /api/instances/:id/heartbeat { tokens, phase, currentTask }`, `POST /api/instances/:id/events { events: Array<{ event: string; payload: unknown; at: string }> }`, `POST /api/instances/:id/exit { reason, code }` [04]
-- Room tokens (room-authenticated): `POST /api/rooms/:id/send`, `GET /api/rooms/:id/read?sinceSeq`, `POST /api/rooms/:id/ask { body, options? }` → `{ questionId }`, `GET /api/questions/:id` (long-poll up to 25 s), `GET /api/rooms/:id/who` [05]
+- Passkeys: `POST /api/auth/register/options`, `POST /api/auth/register/verify`, `POST /api/auth/login/options`, `POST /api/auth/login/verify` → sets the cookie and returns `{ humanId, deviceId, expiresAt, token }` (`token` only when the request carries `X-Swarm-Os-Client: cli`, for the TUI's login flow) [03]; `POST /api/auth/logout`; `POST /api/auth/devices/:id/revoke` (standing) [03]
+- Step-up: `POST /api/stepup/confirm { stepUpId, code }` (host or confirmer device) [03]
+- `GET /api/me` → `{ humanId, name, deviceId, confirmer, vapidPublic }` [03]
+- Streams: `GET /api/stream`, `GET /api/instances/:id/stream` [03 hub; 04 and 05 publish]
+- Rooms & messages: `GET /api/rooms`, `GET /api/rooms/:id/messages?beforeSeq&limit`, `POST /api/rooms/:id/messages { kind: "text", body, replyTo? }` [05]
+- Questions: `POST /api/questions/:id/answer { body }` (human or cos) → `{ question, late }`; room-token: `GET /api/questions/:id` long-polls up to 25 s [05]
+- Commands: `POST /api/commands { room, argv: string[], stepUpId?, code? }` → `CommandResult` or the status codes above; `GET /api/commands` → `Array<{ name, kind, summary }>` [05]
+- Instances: `GET /api/instances`, `GET /api/instances/:id` [04]; instance-authenticated: `POST /api/instances/:id/attach { runId, dashboardUrl, pid }`, `POST /api/instances/:id/heartbeat { tokens, phase, currentTask }`, `POST /api/instances/:id/events { events: Array<{ event: string; payload: unknown; at: string }> }`, `POST /api/instances/:id/exit { reason, code }`, `POST /api/instances/:id/sessions { role, sessionId }` → `{ participantId, roomToken }` [04]
+- Room tokens (room-authenticated): `POST /api/rooms/:id/send`, `GET /api/rooms/:id/read?sinceSeq`, `POST /api/rooms/:id/ask { body, options? }` → `{ questionId }`, `GET /api/rooms/:id/who` [05]
 - Resources: `GET /api/resources` [04]
 - Push: `POST /api/push/subscribe { subscription }`, `DELETE /api/push/subscribe` [05]
 - Webhooks: `POST /hooks/trello/:boardId`, `HEAD /hooks/trello/:boardId`, `POST /hooks/github/:owner/:repo` [04]
-- Static: `GET /` and `GET /assets/*` serve the embedded dashboard [07]
-
-WebSocket at `GET /api/ws` (same bearer in `Sec-WebSocket-Protocol: bearer,<token>`). Frames are JSON `{ type, ...}`:
-
-- brain → client: `hello { actor, rooms: RoomRow[], instances: InstanceRow[], resources: ResourceSnapshot | null, cooldownUntil? }`, `message { message: MessageRow }`, `instance { instance: InstanceRow }`, `decision { decision: DispatchDecisionRow }`, `resources { snapshot }`, `stepup { stepUpId, command: string[], expiresAt }` (confirmers only), `ack { ref, result }`, `error { ref?, code, message }`
-- client → brain: `subscribe { rooms: string[] | "all" }`, `send { ref, room, body, replyTo? }`, `command { ref, room, argv, stepup? }`, `answer { ref, questionId, body }`, `ping`
-- instance → brain (instance token): `heartbeat {...}`, `events {...}`, `exit {...}`; brain → instance: `command { argv }` (`pause`, `stop`, `answer <questionId> <body>`)
+- Static: `GET /`, `GET /assets/*`, `GET /sw.js`, `GET /manifest.webmanifest` serve the embedded dashboard [07]
 
 ### Instance protocol and the room MCP server (plan 01 implements the run side; plan 04 the brain side)
 
-`swarm run --card <id> --yes --no-tree --os <url> --os-token <token>` is what the launcher runs, with `cwd` = the directory containing `.swarm` and `--swarm-path` set explicitly. On start the run calls `attach`, then every 15 s `heartbeat`, forwards every event from `eventBus.onAny` in batches of up to 50 or every 2 s, and calls `exit` on the way out (also from the SIGINT and login-expired paths). Each session (worker, reviewer, arbiter) gets an MCP server entry
+`swarm run --card <id> --yes --no-tree --os <url> --os-token <token>` is what the launcher runs, with `cwd` = the directory containing `.swarm` and `--swarm-path` set explicitly. On start the run calls `attach`, opens `GET /api/instances/:id/stream` with `openEventStream` (reconnecting; `command` events are `pause`, `stop` and `answer`), then every 15 s `heartbeat`, forwards every event from `eventBus.onAny` in batches of up to 50 or every 2 s, and calls `exit` on the way out (also from the SIGINT and login-expired paths). Each session (worker, reviewer, arbiter) gets an MCP server entry
 
 ```ts
 { type: "stdio", command: process.execPath, args: [<swarm binary or cli entry>, "room-mcp"], env: { SWARM_OS_URL, SWARM_ROOM_TOKEN, SWARM_ROOM_ID, SWARM_PARTICIPANT_ID } }
@@ -259,7 +284,7 @@ export class Messaging {
   ask(input: { roomId: string; from: ParticipantRef; instanceId: string; sessionId: string; body: string; options?: string[] }): Promise<QuestionRow>;
   answer(questionId: string, from: ParticipantRef, body: string): Promise<{ question: QuestionRow; late: boolean }>;
   expireQuestions(now: Date, precedent: Precedent): Promise<QuestionRow[]>;
-  subscribe(actor: Actor, rooms: string[] | "all", sink: (frame: Frame) => void): () => void;
+  // delivery goes through EventHub.publish with a visibleTo built from visibleRooms; there is no per-client subscribe here
   visibleRooms(actor: Actor): Promise<RoomRow[]>;
 }
 export interface Provenance { source: "owner" | "human" | "cos" | "worker" | "reviewer" | "arbiter" | "instance" | "card" | "webhook" | "memory" | "tool" | "system"; sessionId?: string; deviceId?: string; address?: string; instanceId?: string; cardRef?: CardRef }
@@ -315,7 +340,7 @@ export class Lockdown { engage(by: Actor): Promise<void>; release(by: Actor & { 
 
 ### Test doubles (shared, plan 02 and 04 create them; everyone uses them)
 
-`packages/os/src/testing/index.ts` exports `MemoryOsStore`, `FakeLauncher` (records specs; `status` scripted), `FakeBoardClient` (cards set by the test; `emit(ref)` simulates a webhook), `FakeClock` (`now()`, `advance(ms)`), `FakePush` (records sends), `FakeSdk` (scripted chief-of-staff turns and tool calls), `makeConfig(overrides)`. Plan 05's `Messaging` tests, plan 06's chief-of-staff tests and plan 09's red-team tests run entirely on these; the only tests that touch Postgres or the Agent SDK are in `tests/integration/os-*.test.ts`, gated by `SWARM_SDK_E2E=1`.
+`packages/os/src/testing/index.ts` exports `MemoryOsStore`, `FakeEventHub` (records published events and lets a test attach a fake actor), `FakeLauncher` (records specs; `status` scripted), `FakeBoardClient` (cards set by the test; `emit(ref)` simulates a webhook), `FakeClock` (`now()`, `advance(ms)`), `FakePush` (records sends), `FakeSdk` (scripted chief-of-staff turns and tool calls), `makeConfig(overrides)`. Plan 05's `Messaging` tests, plan 06's chief-of-staff tests and plan 09's red-team tests run entirely on these; the only tests that touch Postgres or the Agent SDK are in `tests/integration/os-*.test.ts`, gated by `SWARM_SDK_E2E=1`.
 
 ### Logging
 
