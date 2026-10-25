@@ -218,6 +218,12 @@ export interface BackendConfig {
   mcpServers?: Record<string, McpServerEntry>;
   /** Agent SDK query timeout in seconds. Default: 600 (10 minutes). Set to 0 for unlimited. */
   timeout?: number;
+  /** How a claude-code session is billed. "subscription": the Claude account
+   *  the machine is logged into; ANTHROPIC_API_KEY is withheld from the
+   *  session even when the shell has one, which otherwise makes the Agent SDK
+   *  bill the API instead. "api_key": forward ANTHROPIC_API_KEY as before.
+   *  Default: "api_key". */
+  auth?: "subscription" | "api_key";
   /** Model for this backend, e.g. "claude-haiku-4-5-20251001".
    *
    *  Omitted means the Agent SDK's own default — which is the operator's

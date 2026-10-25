@@ -57,6 +57,7 @@ The reviewer and the arbiter judge the work against the project's binding rules,
 swarm init                    # Scaffold a swarm for your project
 swarm run --project my-app    # Execute goals with the orchestrator
 swarm run --dashboard-lan     # With live dashboard accessible on LAN
+swarm run --preflight         # Everything up to the preflight screen, then stop
 swarm skill                   # Manage skill files
 swarm mcp                     # MCP server operations
 swarm substrate start|stop|status  # Manage the Substrate sidecars
@@ -66,6 +67,30 @@ swarm uninstall               # Remove swarm from project
 swarm uninstall --global      # Stop the sidecars, remove the installed swarm binary
 swarm --help                  # All commands and options
 ```
+
+## One Command Per Run
+
+`swarm run` from the project directory is the whole run. It starts the project's Substrate sidecars when they are down, syncs `.swarm/` into the store, and takes one project lock (`.swarm/run.lock`, released when the process ends) so a second `swarm run` on the same project refuses instead of fighting the first. What a launcher script used to do around it lives in `config.json`:
+
+```json
+{
+  "source_control": { "strategy": "remote_pr", "sync_base_branch": true },
+  "setup_command": "pnpm install --frozen-lockfile --silent",
+  "dashboard": { "port": 3141, "lan": true },
+  "backends": {
+    "worker":   { "type": "claude-code", "auth": "subscription" },
+    "reviewer": { "type": "claude-code", "auth": "subscription" },
+    "arbiter":  { "type": "claude-code", "auth": "subscription" }
+  }
+}
+```
+
+- **`source_control.sync_base_branch`** brings the work repo's base branch up to date before anything reads it: the repo must have the base branch checked out with a clean tree, then swarm fetches the remote and fast-forwards. Another branch, uncommitted changes, or a base that has diverged from the remote stops the run with a message saying what to do. Default off.
+- **`setup_command`** runs in the work repo after the sync, with `sh -c` and your terminal: dependency installs, a test database, generated code. A non-zero exit stops the run. It runs once per `swarm run`, so a 10 s `pnpm install` is a 10 s start.
+- **`dashboard`** holds the live dashboard's defaults; `--dashboard-port` and `--dashboard-lan` still override it per run.
+- **`backends.<role>.auth`** is how claude-code sessions are billed. `"subscription"` withholds `ANTHROPIC_API_KEY` from the sessions even when the shell exports one, so they bill the Claude account the machine is logged into instead of the API; the preflight screen says so under **Credentials**. Default `"api_key"` forwards the key as before.
+
+`swarm run --preflight` does all of that, through fetching goals and the preflight screen, then stops before any goal is started. It is how you check a project is ready without spending a token on it.
 
 ## Token Budgets
 

@@ -16,7 +16,7 @@ const BOOLEAN_FLAGS = new Set([
   "guided", "quick", "empty", "no-skill", "no-animation",
   "yes", "y", "tree", "no-tree", "dashboard-lan", "lan-dashboard",
   "global", "all", "quiet", "force", "resume", "fresh",
-  "help", "h", "apply",
+  "help", "h", "apply", "preflight",
 ]);
 
 // Canonical name → any accepted aliases. Parser normalizes aliases to the
@@ -93,6 +93,8 @@ function printHelp(): void {
   console.log("  --yes, -y             Skip preflight confirmation");
   console.log("  --dashboard-lan       Expose dashboard on local network (0.0.0.0) — no login: anyone on the");
   console.log("                        network can see the run, and read and change this project's Substrate store");
+  console.log("  --preflight           Do everything up to the preflight screen (Substrate, sync, base branch,");
+  console.log("                        setup_command, goals) and stop before any goal is started");
   console.log("  --resume              Resume from checkpoint without prompting");
   console.log("  --fresh               Discard checkpoint and start fresh");
   console.log("");
