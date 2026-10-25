@@ -192,6 +192,11 @@ export interface SourceControlConfig {
   base_branch?: string;
   /** Prefix for session branch names. Default: "swarm/". */
   branch_prefix?: string;
+  /** Bring the work repo's base branch up to date before the run: the repo
+   *  must have `base_branch` checked out with a clean tree, then swarm fetches
+   *  `remote` and fast-forwards. A dirty tree, another branch, or a base that
+   *  has diverged from the remote stops the run before any work. Default: false. */
+  sync_base_branch?: boolean;
   /** Whether to auto-push on goal complete (remote_pr only). Default: true. */
   auto_push?: boolean;
   /** Whether to open a PR on goal complete (remote_pr only). Default: true. */
@@ -373,6 +378,18 @@ export interface ProjectConfig {
   prerequisites?: PrerequisiteCheck[];
   /** Source control strategy for persisting completed work. */
   source_control?: SourceControlConfig;
+  /** A shell command run in the work repo before each run, after the base
+   *  branch sync: dependency installs, a test database, generated code. Runs
+   *  with `sh -c`, inherits the terminal, and a non-zero exit stops the run. */
+  setup_command?: string;
+  /** Live dashboard defaults for `swarm run`; the `--dashboard-port` and
+   *  `--dashboard-lan` flags override them. */
+  dashboard?: {
+    /** Port. Default: 3141. */
+    port?: number;
+    /** Listen on 0.0.0.0 so the LAN can reach the dashboard. Default: false. */
+    lan?: boolean;
+  };
   /** Telemetry sharing settings (opt-in, configured during swarm init). */
   telemetry_sharing?: TelemetrySharingConfig;
   /**

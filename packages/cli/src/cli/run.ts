@@ -101,6 +101,7 @@ import {
 import { listSwarmMarkdown } from "./seed.js";
 import { EXTERNAL_DEPENDENCIES, checkDependencyVersion } from "../external-deps.js";
 import { resolveAuthorId } from "./author-id.js";
+import { RunPrepError, acquireRunLock, assertValidRunPrepConfig, runSetupCommand, syncBaseBranch, type BaseSyncResult } from "./run-prep.js";
 import { prepareGitHubAccess, formatGitHubBannerLine } from "./github-account.js";
 import { Swarm, createProvider } from "@mnmal-ai/swarm-core";
 import type { SwarmDeps } from "@mnmal-ai/swarm-core";
@@ -1763,6 +1764,21 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
 
   const runId = `run-${projectName}-${randomUUID().replace(/-/g, "").slice(0, 6)}`;
 
+  // One run per project at a time: a second `swarm run` on the same .swarm
+  // would fight the first over the work repo, the dashboard port and the
+  // checkpoint. The lock names the live process and goes with it.
+  let releaseRunLock: () => void = () => {};
+  try {
+    releaseRunLock = acquireRunLock(swarmPath, runId);
+  } catch (err) {
+    if (err instanceof RunPrepError) {
+      console.error(`\n  ${red("Error:")} ${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  process.on("exit", () => releaseRunLock());
+
   // Resolve the author identity ONCE per session (env USER > git user.email >
   // anonymous). Threaded into every telemetry write path so each row carries it
   // for future per-engineer reporting — taxonomy now, enforcement deferred.
@@ -1793,6 +1809,7 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   assertValidFnlConfig(projectConfig, configPath);
   assertValidContextConfig(projectConfig, configPath);
   assertValidLabelsConfig(projectConfig, configPath);
+  assertValidRunPrepConfig(projectConfig, configPath);
 
   // Complexity thresholds from the swarm's swarm.json (defaults when it has no
   // complexity section). Loaded here so a bad section stops the run before any
@@ -1814,6 +1831,35 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   assertGitRepo(repoRoot);
   if (repoRoot !== process.cwd() && args["quiet"] !== "true") {
     console.log(`  ${dim("Work repo")}      ${dim(repoRoot)}`);
+  }
+
+  // The work repo as the run needs it, before anything reads it: the base
+  // branch current with the remote (source_control.sync_base_branch), then the
+  // project's own setup (setup_command). Either one refusing stops the run.
+  const baseBranch = projectConfig.base_branch ?? "main";
+  let baseSync: BaseSyncResult | undefined;
+  try {
+    if (projectConfig.source_control?.sync_base_branch) {
+      const remote = projectConfig.source_control.remote ?? "origin";
+      // swarm's own directory, when it is inside the work repo, is not dirt.
+      baseSync = syncBaseBranch(repoRoot, remote, baseBranch, [swarmPath]);
+      if (args["quiet"] !== "true") {
+        const moved = baseSync.commits === 0
+          ? "already current"
+          : `fast-forwarded ${baseSync.commits} commit${baseSync.commits === 1 ? "" : "s"} to ${baseSync.after.slice(0, 7)}`;
+        console.log(`  ${dim("Base branch")}    ${dim(`${baseBranch} ← ${remote}: ${moved}`)}`);
+      }
+    }
+    if (projectConfig.setup_command) {
+      if (args["quiet"] !== "true") console.log(`  ${dim("Setup")}          ${dim(projectConfig.setup_command)}`);
+      await runSetupCommand(repoRoot, projectConfig.setup_command);
+    }
+  } catch (err) {
+    if (err instanceof RunPrepError) {
+      console.error(`\n  ${red("Error:")} ${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
   }
 
   // The GitHub account swarm's own GitHub operations run as. With
@@ -2160,7 +2206,10 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   // -------------------------------------------------------------------------
   // Preflight: verify required credentials before dispatching any work
   // -------------------------------------------------------------------------
-  preflightCredentialCheck(projectConfig, workerBackend.type, fallbackUsed);
+  const workerAuth = projectConfig.backends?.worker?.auth ?? "api_key";
+  if (workerAuth !== "subscription" || fallbackUsed) {
+    preflightCredentialCheck(projectConfig, workerBackend.type, fallbackUsed);
+  }
 
   // A codex role runs only with Codex installed, its deny list enforceable
   // and its hook passing the self-test: Codex runs commands its hook failed to judge.
@@ -2473,6 +2522,12 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   const permMode = workerBackendConfig.permissions?.mode ?? "acceptEdits";
   const skipConfirm = args["yes"] === "true" || args["y"] === "true" || !process.stdin.isTTY;
   const showTree = args["no-tree"] !== "true";
+  const preflightOnly = args["preflight"] === "true";
+
+  // Dashboard: flags over config.dashboard over the defaults.
+  const dashboardEnabled = args["no-dashboard"] !== "true";
+  const dashboardPort = parseInt(args["dashboard-port"] ?? String(projectConfig.dashboard?.port ?? 3141), 10);
+  const dashboardLan = args["dashboard-lan"] === "true" || (args["dashboard-lan"] === undefined && projectConfig.dashboard?.lan === true);
 
   // --- Swarm tree printer ---
   if (showTree) {
@@ -2521,6 +2576,9 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   // Credentials — only show keys relevant to the configured provider
   console.log("");
   console.log(`  ${bold("Credentials")}`);
+  if (workerAuth === "subscription") {
+    console.log(`    Billing     ${green("Claude subscription")}${process.env.ANTHROPIC_API_KEY ? dim("  (ANTHROPIC_API_KEY withheld from sessions)") : ""}`);
+  }
   const relevantKeys = getProviderCredentialKeys(providerName);
   // Claude Code backend manages its own auth, but show the key status
   // since it's needed for fallback and oversight API calls
@@ -2568,9 +2626,20 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   const scStrategy = projectConfig.source_control?.strategy ?? "ephemeral";
   console.log("");
   console.log(`  ${bold("Source control")}  ${dim(scStrategy)}`);
+  if (baseSync) {
+    console.log(`  ${bold("Base branch")}    ${dim(`${baseBranch} at ${baseSync.after.slice(0, 7)}${baseSync.commits > 0 ? ` (+${baseSync.commits} from remote)` : ", current"}`)}`);
+  }
+  if (projectConfig.setup_command) {
+    console.log(`  ${bold("Setup")}          ${green("ran")} ${dim(projectConfig.setup_command)}`);
+  }
   if (worktreesEnabled) {
     console.log(`  ${bold("Worktrees")}      ${dim(".swarm/worktrees/")}`);
   }
+
+  // Dashboard
+  console.log(`  ${bold("Dashboard")}      ${dashboardEnabled
+    ? dim(`port ${dashboardPort}${dashboardLan ? ", on the LAN" : ", this machine only"}${args["dashboard-port"] || args["dashboard-lan"] ? "" : projectConfig.dashboard ? " (config.dashboard)" : ""}`)
+    : dim("off")}`);
 
   // Telemetry
   const telemetrySharing = projectConfig.telemetry_sharing?.enabled ? green("on") : dim("off");
@@ -2585,6 +2654,12 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   }
 
   trace("M01 reached confirmation-prompt block");
+  if (preflightOnly) {
+    console.log(green("  Preflight passed.") + dim(" --preflight: stopping here, no goal was started."));
+    console.log("");
+    releaseRunLock();
+    process.exit(0);
+  }
   // Confirmation prompt
   if (!skipConfirm) {
     trace("M02 readline.createInterface starting (will block on Enter)");
@@ -2611,13 +2686,10 @@ export async function runOrchestrator(args: Record<string, string>, substrateCli
   // 8b. Start live dashboard
   // -------------------------------------------------------------------------
 
-  const dashboardEnabled = args["no-dashboard"] !== "true";
   trace(`M06 dashboardEnabled=${dashboardEnabled}`);
   let dashboardServer: DashboardServer | null = null;
 
   if (dashboardEnabled) {
-    const dashboardPort = parseInt(args["dashboard-port"] ?? "3141", 10);
-    const dashboardLan = args["dashboard-lan"] === "true";
     trace(`M07 about to construct DashboardServer port=${dashboardPort} lan=${dashboardLan}`);
     dashboardServer = new DashboardServer(eventBus, dashboardPort, backend, dashboardLan, substrateClient);
     trace("M08 DashboardServer constructed");

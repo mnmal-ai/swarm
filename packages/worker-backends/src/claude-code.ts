@@ -299,6 +299,8 @@ export class ClaudeCodeBackend implements IWorkerBackend {
   private ghConfigDir: BackendConfig["ghConfigDir"];
   /** fnl to route Bash through; see BackendConfig.fnl and fnl-hook.ts. */
   private fnl: BackendConfig["fnl"];
+  /** How the session is billed; see BackendConfig.auth. */
+  readonly auth: NonNullable<BackendConfig["auth"]>;
   private queryTimeoutMs: number;
 
   /** Shell metacharacters that are not allowed in tool patterns. */
@@ -316,6 +318,7 @@ export class ClaudeCodeBackend implements IWorkerBackend {
     this.gitIdentity = config.gitIdentity;
     this.ghConfigDir = config.ghConfigDir;
     this.fnl = config.fnl;
+    this.auth = config.auth ?? "api_key";
     this.queryTimeoutMs = config.timeout === 0 ? 0 : ((config.timeout ?? 600) * 1000);
 
     // fnl is run without a shell; an absolute path means no PATH lookup can
@@ -404,6 +407,10 @@ export class ClaudeCodeBackend implements IWorkerBackend {
         filteredEnv[key] = value;
       }
     }
+    // Billed to the Claude account the machine is logged into: the Agent SDK
+    // bills the API whenever it sees ANTHROPIC_API_KEY, so a shell that
+    // exports one must not hand it to the session.
+    if (this.auth === "subscription") delete filteredEnv.ANTHROPIC_API_KEY;
     // A configured git identity adds exactly the four GIT_AUTHOR_*/
     // GIT_COMMITTER_* vars, so commits the agent makes itself are authored and
     // committed as the project requires. Nothing else is widened.

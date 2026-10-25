@@ -881,6 +881,7 @@ https://www.figma.com/file/abc123/MyDesign
 .tasks/
 .checkpoints/
 telemetry/events/
+run.lock
 `,
 } as const;
 
