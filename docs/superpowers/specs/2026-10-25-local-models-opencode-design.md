@@ -1,6 +1,6 @@
 # Local models through OpenCode: design
 
-Status: draft for the owner's approval, 2026-10-25.
+Status: approved by the owner, 2026-10-25, with the recommendations below on the two questions left open.
 
 ## Intent
 
@@ -140,14 +140,14 @@ A run on another machine uses that machine's endpoint, and its check runs there,
 
 The plan's last task is a proof the controller runs live, on this Mac, against a scratch repository, never a client project. A worker, reviewer and arbiter on `ollama/gpt-oss:20b-64k` through OpenCode carry one small card to a merged commit. The labels and synopses run on the same model. The run is fenced so it can reach only loopback: the proof records every outbound connection with the host's tools and shows none leaves the machine. Unit and integration tests use recorded OpenCode event fixtures that the first task's probe captures, and a fake OpenAI-compatible endpoint. Live-model tests stay out of the suites. The proof may use the owner's Ollama and OpenCode, which also serve the embedder, and runs one model at a time (my call).
 
-## Open for the owner
+## Decided with the owner's approval (2026-10-25)
 
-1. **A private project and the chief of staff.** The chief of staff reads every card, room and worker message. If a project promises `privacy: "local"` but the brain's chief of staff runs on Claude, the promise breaks. The choices:
-   - (a) `swarm os register` refuses the project unless the chief of staff and its readiness model are local.
-   - (b) Turns about that project go to a local model while the rest stay on Claude.
-   - (c) That project's content never reaches a remote chief of staff, which sees only ids and states.
-   - My recommendation is (a): it is the only one that is simple to prove. (b) splits its memory across two models, and (c) leaves it deciding about cards it cannot read. The registration's existing `privacy` field becomes the promise. The host's `swarm os host check` reads the project's setting, so the brain can enforce it for a project on another machine.
-2. **How far the promise reaches beyond models.** Read literally, "nothing from the project leaves the machine" would also cover Trello and GitHub comments, card moves, `git push` and pull requests. My recommendation: the promise covers model inference, embeddings, the PR categorizer, telemetry and Substrate. Boards and git hosting carry on as the project already configured them, because the owner chose those services for the project and they hold its work, not a model's view of it.
+The owner approved the design with these two recommendations as written.
+
+1. **A private project and the chief of staff.** `swarm os register` refuses a project with `privacy: "local"` unless the brain's chief of staff, for every turn kind (`cos.model` and `cos.readiness_model`), runs on a local model. The other options were sending that project's turns to a local model, or keeping its content from a remote chief of staff. Both were rejected: the first splits its memory across two models, and the second leaves it deciding about cards it cannot read.
+   - The registration's existing `privacy` field carries the promise: `"local"` joins `"normal"` and `"local_only"`. The host's `swarm os host check` reads the project's own setting, so the brain enforces it for a project on another machine. A registration whose field disagrees with the project's setting is refused.
+   - Changing `cos.harness` or `cos.model` to a remote model while such a registration exists is refused at config load, naming the registrations.
+2. **How far the promise reaches.** `privacy: "local"` covers model inference (every role, small call and chief-of-staff turn), embeddings, the PR categorizer, telemetry and Substrate. Boards (Trello, GitHub) and git hosting carry on as the project configured them, because the owner chose those services for the project's work. Room messages between a run and its brain are swarm's own traffic. They go only to the brain the owner runs, so they're outside the promise.
 
 ## Left to the builder
 
