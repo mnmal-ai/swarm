@@ -2181,6 +2181,59 @@ git add packages/os/src/commands/registrations.ts packages/os/src/index.ts packa
 git commit -m "feat(os): register, unregister, set ask_first and set limits"
 ```
 
+**Private projects (plan 11, owner decision 2026-10-25).** `register` learns the third privacy value and refuses a `privacy: "local"` project unless every chief-of-staff turn kind runs on a local model. It uses plan 11's validator, `cosTurnLocality(cos, localModels)` and `cosIsLocal(cos, localModels)` from `@mnmal-ai/swarm-types` (`packages/types/src/local-models.ts`), called with `ctx.config.cos` and `ctx.config.local_models`, and plan 11's `privacyClassOf(configs)` for the project's own setting. The registration's `privacy` is the project's class, never a flag: `normal`, `local_only` or `local`.
+
+- [ ] **Step 6: Write the failing tests** (append to `registrations.test.ts`)
+
+```ts
+describe("register a private project", () => {
+  const local = { privacy: "local" };
+  it("refuses privacy local while any chief-of-staff turn is remote, naming the turns", async () => {
+    const w = await newWorld({ ...TRELLO, cos: { model: "claude-sonnet-5-5", readiness_model: "claude-haiku-4-5-20251001" } });
+    const r = await spec("register").run(w.ctx(w.system.id), RegisterArgs.parse({ board: "abcd1234", project: "project-a", swarmPath: project(w.dir, local) }));
+    expect(r).toEqual({ ok: false, text: 'project-a is privacy "local", so every chief-of-staff turn must run on a local model: owner (claude-sonnet-5-5: cos.harness is agent-sdk, which runs on Claude), readiness (claude-haiku-4-5-20251001: claude-haiku-4-5-20251001 is a Claude model), follow_up (claude-sonnet-5-5: claude-sonnet-5-5 is a Claude model). Set cos.harness to "opencode" and cos.model and cos.readiness_model to local models in os.json, then restart the brain.' });
+    expect(await w.store.registrations.find({})).toEqual([]);
+  });
+  it("registers privacy local when every turn is local, and records the class", async () => {
+    const w = await newWorld({ ...TRELLO, host_trust: "owner", cos: { harness: "opencode", model: "ollama/gpt-oss:20b-64k" } });
+    const r = await spec("register").run(w.ctx(w.system.id), RegisterArgs.parse({ board: "abcd1234", project: "project-a", swarmPath: project(w.dir, local) }));
+    expect(r.ok).toBe(true);
+    expect(r.text.endsWith(' It is privacy "local".')).toBe(true);
+    expect((await w.store.registrations.find({}))[0].privacy).toBe("local");
+    expect((await w.store.rooms.find({ kind: "board" }))[0].privacy).toBe("local");
+  });
+  it("applies the host_trust rule to privacy local as to local_only", async () => {
+    const w = await newWorld({ ...TRELLO, host_trust: "shared", cos: { harness: "opencode", model: "ollama/gpt-oss:20b-64k" } });
+    expect((await spec("register").run(w.ctx(w.system.id), RegisterArgs.parse({ board: "abcd1234", project: "project-a", swarmPath: project(w.dir, local) }))).text)
+      .toBe('project-a is privacy "local" and this brain\'s host_trust is "shared": a private project registers only on a host the owner controls.');
+  });
+  it("takes a remote project's class from the host's path report", async () => {
+    // the router's launcherFor("host-a").checkPath answers PathReport with privacy "local"; the brain's chief of staff is remote
+    const w = await newWorld({ ...TRELLO, launcher: { local: true, hosts: [{ name: "host-a", ssh: "host-a" }] }, limits: { launcher_hosts: ["local", "host-a"] }, cos: { model: "claude-sonnet-5-5" } }, { pathReport: { exists: true, directory: true, swarmDir: true, realPath: "/path/to/project/.swarm", privacy: "local" } });
+    const r = await spec("register").run(w.ctx(w.system.id), RegisterArgs.parse({ board: "abcd1234", project: "project-a", swarmPath: "/path/to/project/.swarm", host: "host-a" }));
+    expect(r.ok).toBe(false);
+    expect(r.text.startsWith('project-a is privacy "local", so every chief-of-staff turn must run on a local model')).toBe(true);
+  });
+  it("refuses a host whose report cannot say the project's class", async () => {
+    const w = await newWorld({ ...TRELLO, launcher: { local: true, hosts: [{ name: "host-a", ssh: "host-a" }] }, limits: { launcher_hosts: ["local", "host-a"] } }, { pathReport: { exists: true, directory: true, swarmDir: true, realPath: "/path/to/project/.swarm", privacy: null } });
+    expect((await spec("register").run(w.ctx(w.system.id), RegisterArgs.parse({ board: "abcd1234", project: "project-a", swarmPath: "/path/to/project/.swarm", host: "host-a" }))).text)
+      .toBe("host-a could not read project-a's privacy setting (a config.json under /path/to/project/.swarm does not parse); fix it there, then register again.");
+  });
+});
+```
+
+(`newWorld`'s second argument stubs the router's `checkPath` reply, as Task 9's `--host` tests already do; add the option there if it is missing. `projectPrivacy` replaces `projectIsLocalOnly` in the `helpers` describe: `{ privacy: "local" }` in a domain config → `"local"`, broken JSON throws as before.)
+
+- [ ] **Step 7: Run them to see them fail.** `cd packages/os && env -u ANTHROPIC_API_KEY npx vitest run tests/commands/registrations.test.ts` → FAIL: privacy `local` is registered as `normal`.
+- [ ] **Step 8: Implement.** Replace `projectIsLocalOnly` with `projectPrivacy(swarmPath: string): PrivacyClass` (it reads the same files and applies `privacyClassOf`); for `--host` other than `local`, the class is the `PathReport.privacy` plan 11 added (null refuses with the text above). The refusal order becomes: 1 (domain), then the host-trust rule for `local_only` and `local` (text above for `local`, unchanged for `local_only`), then the chief-of-staff rule for `local` (`cosTurnLocality` entries that are not local, each as `<kind> (<model>: <why>)`, joined with `, `), then 3 to 6. The reply's suffix is ` It is local_only.` or ` It is privacy "local".`.
+- [ ] **Step 9: Run** the test file (PASS) and the task gate.
+- [ ] **Step 10: Commit**
+
+```bash
+git add packages/os/src/commands/registrations.ts packages/os/tests/commands/registrations.test.ts packages/os/tests/helpers/world.ts
+git commit -m "feat(os): register a privacy local project only with a local chief of staff"
+```
+
 ---
 
 ### Task 10: Run CLI commands in-process with captured output
