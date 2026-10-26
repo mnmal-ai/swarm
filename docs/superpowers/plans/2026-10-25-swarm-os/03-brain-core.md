@@ -23,7 +23,7 @@
 - **Enrolment:** "Enrolling a new device needs an existing device's approval and a step-up code." The first device uses the one-time link `swarm os init` prints (`<public_url>/#enrol=<code>`, single use, valid 15 minutes); later devices wait as pending enrolments kept by plan 09's `Enrolments`, approved by the standing command `devices approve <enrolmentId>`.
 - **Instance tokens:** "issued at dispatch and revoked at exit."
 - **Transport:** SSE streams send `retry: 3000`, a `: keepalive` comment every 15 s and `id:`/`event:`/`data:` lines from one sequence that keeps rising across restarts, with a 10,000-event replay ring and `gap` for an older id. Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` under `/api` (a `swarm_os_*` cookie and no `Authorization` header) need `X-Swarm-Os: 1`; bearer callers and cookie-less requests are exempt. CORS allows only the `public_url` origin; anything else gets 403 `forbidden`.
-- **Client address:** from a loopback peer with `X-Forwarded-For` (Tailscale Serve), the first address in that header; otherwise the peer's address; `::ffff:` is stripped. Forwarding headers from any other peer are ignored.
+- **Client address:** from a loopback peer with `X-Forwarded-For` (Tailscale Serve), the last address in that header (the one the loopback proxy appended; earlier entries are client-supplied); otherwise the peer's address; `::ffff:` is stripped. Forwarding headers from any other peer are ignored.
 - **Bind:** "loopback-only on a Mac unless configured otherwise" → default `127.0.0.1:3200`; a non-loopback bind requires an `https:` `public_url`.
 - **OS home:** `osHome()` is `$SWARM_OS_HOME` or `~/.swarm/os` and holds `os.json`, `host.secret`, `journal/`, `instances/`, `logs/`, `cos/` (the chief of staff's working directory), `event-seq`, `lockdown.json`, `bootstrap.json` and `brain.pid`. The directory is `0700`; files holding a secret are `0600`. The OS stack's Substrate plugin directory is plan 02's stack directory, not the OS home.
 - **Shared primitives:** `Clock` and `systemClock` from `packages/os/src/clock.ts`; row date fields are ISO-8601 strings (`string | null` when nullable) and this plan writes `clock.now().toISOString()`; `Repo.find` filters by equality only.
@@ -555,7 +555,7 @@ export function rawRequest(url: string, o?: { method?: string; headers?: Record<
   6. The chain runs in order. A handler returning a value other than `undefined` ends it: `withStatus` sends that status and body, anything else is `200` JSON as it is (bare arrays too). A handler that wrote headers (a stream) ends it. A thrown error whose `code` is a key of `STATUS_OF` (an `ApiError`, or a `GateRefusedError` with its `data`) answers that status with `refusalBody(code, message, extra ?? data)`; anything else is logged and answered `500 internal`. JSON responses carry `Cache-Control: no-store`.
 - Matching: `:name` takes one decoded segment, a trailing `*` the rest as `params["*"]`; where two routes match, the first differing segment decides, static over `:param` over `*`.
 - `idempotent()`: with `Idempotency-Key`, the key is scoped to `human:<sessionId>`, `instance:<id>`, `room:<participantId>`, `host` or `addr:<address>`, plus method and path. A repeat within `IDEMPOTENCY_TTL_MS` (by `deps.clock`) returns the first status and body with `Idempotent-Replay: true`; a repeat while the first is in flight waits for it; responses of 500 and above are not kept; at most 10,000 keys, oldest evicted.
-- `clientAddress`: strip `::ffff:`; `loopback` for 127.0.0.0/8 and `::1`; a loopback peer with `X-Forwarded-For` or `Forwarded` is `proxied`, and its `address` is the first `X-Forwarded-For` entry; forwarding headers from any other peer are ignored.
+- `clientAddress`: strip `::ffff:`; `loopback` for 127.0.0.0/8 and `::1`; a loopback peer with `X-Forwarded-For` or `Forwarded` is `proxied`, and its `address` is the last `X-Forwarded-For` entry (ruling C84); forwarding headers from any other peer are ignored.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -641,9 +641,9 @@ it("replays an idempotent response for 10 minutes, per key, and waits for one in
   await send("k2"); expect(runs).toBe(2);
   clock.advance(IDEMPOTENCY_TTL_MS + 1); await send("k1"); expect(runs).toBe(3);
 });
-it("reads the client address from a loopback proxy's first X-Forwarded-For entry only", () => {
+it("reads the client address from a loopback proxy's last X-Forwarded-For entry only", () => {
   const req = (remote: string, xff?: string) => ({ socket: { remoteAddress: remote }, headers: xff ? { "x-forwarded-for": xff } : {} }) as unknown as IncomingMessage;
-  expect(clientAddress(req("::ffff:127.0.0.1", "100.64.0.7, 203.0.113.9"))).toEqual({ address: "100.64.0.7", loopback: true, proxied: true });
+  expect(clientAddress(req("::ffff:127.0.0.1", "100.64.0.7, 203.0.113.9"))).toEqual({ address: "203.0.113.9", loopback: true, proxied: true });
   expect(clientAddress(req("100.64.0.8", "127.0.0.1"))).toEqual({ address: "100.64.0.8", loopback: false, proxied: false });
   expect(clientAddress(req("::1"))).toEqual({ address: "::1", loopback: true, proxied: false });
 });
