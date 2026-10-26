@@ -161,7 +161,8 @@ export const OsConfigSchema = z.object({
   poll_interval_seconds: z.number().int().default(120),
   ask: z.object({ min_wait_minutes: z.number().int().default(30), quiet_windows: z.array(z.object({ start: z.string().regex(/^\d\d:\d\d$/), end: z.string().regex(/^\d\d:\d\d$/) })).default([]), timezone: z.string().default("UTC") }),
   boards: z.object({ trello: z.object({ key: z.string(), token: z.string() }).optional(), github: z.object({ token: z.string() }).optional() }).default({}),
-  cos: z.object({ model: z.string().default("claude-sonnet-5-5"), auth: z.enum(["subscription", "api_key"]).default("subscription"), max_turns: z.number().int().default(20) }),
+  cos: z.object({ model: z.string().default("claude-sonnet-5-5"), auth: z.enum(["subscription", "api_key"]).default("subscription"), max_turns: z.number().int().default(20),
+    standing: z.object({ default: z.enum(["deny", "confirm", "veto"]).default("confirm"), commands: z.record(z.string(), z.enum(["deny", "confirm", "veto"])).default({}), veto_seconds: z.number().int().min(60).default(300) }).default({}) }),   // owner decision 2026-10-25, plan 05 adds it: see "Chief of staff standing commands" below
   session_ttl_hours: z.number().int().default(24),
   stepup_ttl_seconds: z.number().int().default(120),
 });
@@ -477,6 +478,15 @@ The plans were written in parallel against the contracts above; their reports ad
 - Plan 05 owns `packages/os/src/commands/gate.ts` until plan 09 replaces it with re-exports; plan 09 owns `tests/integration/os-harness.ts` and the final `tripwires.ts`.
 - Plan 07 adds `scripts/gen-web-manifest.mjs`, the generated embed manifest, a `prebuild` in `packages/os/package.json`, one `await registerStatic(api)` line in plan 03's composition root, and `.gitignore` entries.
 - Plan 08 adds `packages/os/src/api/cli-login.ts`, `packages/os/src/commands/{argv-args,registrations}.ts`, `packages/cli/src/cli/sync.ts` (sync moves out of `main.ts`), and one guard line in `packages/cli/src/cli/os.ts`.
+
+**Chief of staff standing commands (owner decision 2026-10-25; replaces plan 03 ruling C54)**
+- The chief of staff may request every standing command except `lockdown release` and `devices approve`, which stay refused for actor `cos` (403 `forbidden`, reason `cos_standing`) whatever `os.json` says.
+- Its mode per command is `os.json` `cos.standing.commands[<name>] ?? cos.standing.default`, then tightened (never loosened) by any active `Memory` row of kind `standing_order` with scope `cos_standing` and subject `<name>` whose body starts with `deny` or `confirm`. Order: `deny` > `confirm` > `veto`. `veto` never applies to `db reset` or `merge`: the schema refuses it as their entry, and a `veto` default resolves to `confirm` for them.
+- `deny`: 403 `forbidden`, reason `cos_standing`, before any step-up; the chief of staff replies with the exact command for the owner.
+- `confirm` (default): plan 05's original gate. The step-up's requester session is `COS_SESSION_ID`, and its audience is the host plus every confirmer device except the `deviceId` in the prompting owner message's provenance. The chief of staff can never send the code back; a human confirms with `swarm os confirm` or the dashboard, and plan 03's `confirmStanding` runs it through `executeConfirmed`.
+- `veto`: the executor posts a `system` message and notifies every owner on every device ("the chief of staff will run /<command> at <time>; veto with /veto <id>"), then runs it after `cos.standing.veto_seconds` unless a human sends the operating command `veto <id>` (any session or the host, one request). A lockdown, a cool-down of the prompting session or a brain restart cancels every pending veto-window command.
+- Every request, confirmation, veto and run is announced in the system room, and counts toward the burst tripwire as a human's would.
+- Plan 05 owns the executor change, the `veto` command, the schema field and the removal of plan 03's blanket `cos_standing` refusal in `requestStanding`; plan 06 exposes standing commands as tools again and tells the owner which mode applied; plan 09's red team covers each mode, the two never-available commands, a store-written memory row that tries to loosen a mode, and a veto racing a lockdown.
 
 **Metrics (from the plans' metrics tasks, 2026-10-25)**
 - Plan 10 runs first and owns `packages/metrics` except `src/catalogue/os.ts`, where plans 01 to 09 each append after their own `// plan 0N` line.
